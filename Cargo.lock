@@ -1505,6 +1505,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "httpdate",
+ "libc",
  "percent-encoding",
  "proptest",
  "rand 0.9.5",
@@ -1513,12 +1514,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "swiftload-testserver",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
