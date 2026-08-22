@@ -1,0 +1,21 @@
+[package]
+name = "swiftload-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Headless driver for the SwiftLoad engine."
+
+[dependencies]
+swiftload-core = { path = "../swiftload-core" }
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "swiftload"
+path = "src/main.rs"

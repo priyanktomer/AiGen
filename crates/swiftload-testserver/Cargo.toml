@@ -1,0 +1,33 @@
+[package]
+name = "swiftload-testserver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Deterministic, adversarial HTTP server for SwiftLoad tests and benchmarks."
+
+[lib]
+name = "swiftload_testserver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "swiftload-testserver"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "signal"] }
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+httpdate.workspace = true
+futures-util.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

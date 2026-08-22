@@ -1,0 +1,30 @@
+[package]
+name = "swiftload-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SwiftLoad download engine: segmented HTTP downloading with adaptive concurrency."
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+url.workspace = true
+rand.workspace = true
+sha2.workspace = true
+httpdate.workspace = true
+percent-encoding.workspace = true
+futures-util.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "fs"] }
+tempfile = "3"
+proptest = "1"
