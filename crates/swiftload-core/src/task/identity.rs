@@ -522,3 +522,140 @@ mod tests {
         }
     }
 }
+
+// ─────────────────────────── the verification runner ───────────────────────────
+
+use crate::{
+    config::{RequestSpec, Settings},
+    fsx,
+    http::client,
+    task::probe::{probe, ProbeError},
+};
+use std::path::Path;
+
+/// The full result of validating a replacement URL. Produced without mutating anything, so the
+/// UI can show the evidence before the user commits to a swap.
+#[derive(Debug, Clone)]
+pub struct ValidationReport {
+    pub verdict: Verdict,
+    /// What the replacement URL says about itself.
+    pub new_signals: ResourceSignals,
+    pub resolved_url: String,
+    pub windows_checked: usize,
+    /// Bytes spent proving identity. The feature exists to avoid re-transferring data, so this
+    /// is held to a hard budget and reported honestly.
+    pub bytes_verified: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshError {
+    #[error("could not reach the replacement link: {0}")]
+    Probe(#[from] ProbeError),
+    #[error("could not read the existing partial file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("client setup failed: {0}")]
+    Client(String),
+}
+
+/// Validate a replacement URL against an existing partial download.
+///
+/// Mutates nothing: this is the read-only half of the swap, so the UI can present evidence and
+/// let the user decide before any state changes.
+pub async fn validate_replacement_url(
+    new_url: &str,
+    old: &ResourceSignals,
+    part_path: &Path,
+    completed: &RangeSet,
+    download_id: &str,
+    settings: &Settings,
+    spec: &RequestSpec,
+) -> Result<ValidationReport, RefreshError> {
+    // A full probe of the replacement. The old capabilities are never carried over: the new
+    // link may resolve to a different host with different range support entirely.
+    let pr = probe(new_url, settings, spec, false).await?;
+    let new_signals = ResourceSignals::from_probe(&pr);
+
+    let (pre, ev) = compare(old, &new_signals);
+
+    // Content is verified whenever there is anything to verify against — even when the headers
+    // agree perfectly.
+    //
+    // Tier 0 (size plus a matching strong ETag) is strong evidence that the *server* is serving
+    // the same resource, but it says nothing about the bytes already on *our* disk. A partial
+    // file damaged by a bad sector, a truncated write, or an unrelated process would sail
+    // straight through a header comparison and be resumed over, producing a right-sized,
+    // wrong-content file. Since the check costs about 256 KB — roughly 0.003% of a 10 GB
+    // download — there is no case for skipping it.
+    //
+    // So Tier 0 now means "no *prompt* is needed", not "no verification is needed".
+    let verifiable = completed.total() > 0
+        && pr.range_support == RangeSupport::Supported
+        && !matches!(pre, Preliminary::Reject(_) | Preliminary::RestartOnly);
+    if !verifiable {
+        return Ok(ValidationReport {
+            verdict: finalize(pre, ev, None, 0),
+            new_signals,
+            resolved_url: pr.final_url.to_string(),
+            windows_checked: 0,
+            bytes_verified: 0,
+        });
+    }
+
+    let windows = choose_windows(completed, download_id, WINDOW_COUNT);
+    let http = client::build(settings, spec, &pr.final_url).map_err(|e| RefreshError::Client(e.to_string()))?;
+    let file = std::fs::File::open(part_path)?;
+
+    let mut bytes_verified = 0u64;
+    let mut mismatch = None;
+
+    for (offset, len) in &windows {
+        let (off, len) = (*offset, *len);
+
+        // What we already have on disk.
+        let mut local = vec![0u8; len as usize];
+        let read = fsx::read_at(&file, &mut local, off)?;
+        local.truncate(read);
+
+        // The same window from the replacement URL.
+        let resp = client::apply_spec(http.get(pr.final_url.clone()), spec)
+            .header(reqwest::header::RANGE, format!("bytes={}-{}", off, off + len - 1))
+            .send()
+            .await;
+
+        let remote = match resp {
+            Ok(r) if r.status() == 206 => match r.bytes().await {
+                Ok(b) => b,
+                Err(e) => return Err(RefreshError::Client(e.to_string())),
+            },
+            // Anything other than a proper partial response means we cannot confirm the bytes
+            // line up, and "cannot confirm" must never become "assume fine".
+            Ok(r) => {
+                return Ok(ValidationReport {
+                    verdict: Verdict::Reject(RejectReason::ContentMismatch { offset: off }),
+                    new_signals,
+                    resolved_url: pr.final_url.to_string(),
+                    windows_checked: bytes_verified as usize,
+                    bytes_verified: {
+                        let _ = r;
+                        bytes_verified
+                    },
+                });
+            }
+            Err(e) => return Err(RefreshError::Client(e.to_string())),
+        };
+
+        bytes_verified += remote.len() as u64;
+        if let Some(at) = first_difference(off, &local, &remote) {
+            mismatch = Some(at);
+            break; // one mismatch is conclusive; no point spending more traffic
+        }
+    }
+
+    Ok(ValidationReport {
+        verdict: finalize(pre, ev, mismatch, windows.len()),
+        new_signals,
+        resolved_url: pr.final_url.to_string(),
+        windows_checked: windows.len(),
+        bytes_verified,
+    })
+}

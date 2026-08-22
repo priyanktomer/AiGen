@@ -845,7 +845,7 @@ Run the cheapest tier that reaches sufficient confidence.
 
 | Tier | Cost on a 10 GB / 6.5 GB-done download | What it proves |
 |---|---|---|
-| **0 — Header agreement** | 0 extra bytes (the probe already happened) | Size matches **and** (strong ETag matches **or** Last-Modified matches). Circumstantial but strong. |
+| **0 — Header agreement** | 0 extra bytes (the probe already happened) | Size matches **and** (strong ETag matches **or** Last-Modified matches). Circumstantial but strong. **Note (revised in implementation):** Tier 0 now means *no prompt is needed*, not *no verification is needed* — Tier 1 runs regardless. See the box below. |
 | **1 — Anchored spot-check** ★ default | **4 × 64 KB = 256 KB ≈ 0.0025% of the file, < 2 s** | Server bytes match local bytes at 4 independent windows inside the already-completed region. Catches every realistic mismatch. |
 | **2 — Full re-verification** | re-reads all 6.5 GB (65% of a restart) | Byte-identity of the whole completed region. Opt-in only. |
 | **3 — Deferred whole-file hash** | 0 up front; whole-file read at the end | Requires a user-supplied `expected_sha256`. Resume immediately, verify at completion, never publish a bad file. |
@@ -866,6 +866,16 @@ risk to an adversary who holds both the real file and the ability to serve match
 unpredictable offsets. Tier 2 spends 65% of a full re-download to close a gap Tier 1 has already
 made negligible. **Tier 1 is the default**; Tier 2 is an explicit "Verify thoroughly" button;
 Tier 3 is strictly better than either whenever a checksum is available.
+
+> **Revised during implementation: Tier 1 always runs when there is local data to verify.**
+> The approved plan let a Tier-0 header match skip content verification entirely. Testing the
+> corrupted-partial case (§G.4 test 10) showed why that is wrong: Tier 0 proves the *server* is
+> serving the same resource, but says nothing about the bytes already on *our* disk. A partial
+> damaged by a bad sector, a truncated write, or an unrelated process sails straight through a
+> header comparison and gets resumed over — producing exactly the right-sized, wrong-content
+> file this whole mechanism exists to prevent. At ~256 KB (0.003% of a 10 GB download) there is
+> no case for skipping it. Tier 0 now governs whether the user is *prompted*, not whether the
+> bytes are *checked*.
 
 > **A Tier-1 mismatch is a hard reject, never a confirmable warning.** Letting a user click past a
 > proven byte mismatch is precisely how a 10 GB file gets corrupted. On mismatch the message stays
