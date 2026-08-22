@@ -1492,8 +1492,10 @@ dependencies = [
  "anyhow",
  "clap",
  "serde_json",
+ "sha2",
  "swiftload-core",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1518,6 +1520,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
  "uuid",

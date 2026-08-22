@@ -22,6 +22,7 @@ sha2.workspace = true
 httpdate.workspace = true
 percent-encoding.workspace = true
 futures-util.workspace = true
+tokio-util.workspace = true
 rusqlite.workspace = true
 
 [target.'cfg(windows)'.dependencies]

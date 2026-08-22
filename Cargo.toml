@@ -29,6 +29,7 @@ sha2 = "0.10"
 httpdate = "1"
 percent-encoding = "2"
 futures-util = "0.3"
+tokio-util = "0.7"
 rusqlite = { version = "0.37", features = ["bundled"] }
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }

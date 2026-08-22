@@ -23,9 +23,10 @@ use std::time::Duration;
 
 /// What we learned about the server's range support. `Unknown` never occurs after a
 /// successful probe; it exists for records loaded from an older schema.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RangeSupport {
+    #[default]
     Unknown,
     /// Verified: the server answered a ranged request with 206 and a matching Content-Range.
     Supported,
