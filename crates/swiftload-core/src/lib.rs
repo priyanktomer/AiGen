@@ -6,5 +6,6 @@
 pub mod config;
 pub mod fsx;
 pub mod http;
+pub mod store;
 pub mod task;
 pub mod util;

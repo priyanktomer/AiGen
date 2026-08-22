@@ -1491,9 +1491,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "reqwest",
  "serde_json",
  "sha2",
  "swiftload-core",
+ "swiftload-testserver",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
