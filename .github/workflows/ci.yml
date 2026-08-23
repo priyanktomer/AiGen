@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Loopback tests must not be routed through a proxy.
+  NO_PROXY: 127.0.0.1,localhost
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The crash-recovery tests spawn the real binary and SIGKILL it, so they need the
+      # binaries built before the test run rather than during it.
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Tests
+        run: cargo test --workspace
+
+  engine-boundary:
+    name: engine has no UI dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # swiftload-core is driven identically by the CLI, the benchmark harness and (later) the
+      # desktop shell. If a UI dependency ever leaks into it, that separation is gone and the
+      # engine stops being independently testable — so fail the build rather than notice later.
+      - name: Assert swiftload-core stays UI-free
+        run: |
+          set -euo pipefail
+          deps=$(cargo tree -p swiftload-core --edges normal --prefix none | awk '{print $1}' | sort -u)
+          for forbidden in tauri wry webkit2gtk gtk winit; do
+            if grep -qx "$forbidden" <<<"$deps"; then
+              echo "::error::swiftload-core depends on $forbidden; the engine must stay UI-free"
+              exit 1
+            fi
+          done
+          echo "engine dependency boundary intact"
+
+  benchmark:
+    name: benchmark smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # A correctness suite cannot catch a throughput regression, and a debug build cannot
+      # measure one. Small and fast: this is a smoke test, not the full matrix.
+      - name: Run smoke benchmark
+        run: |
+          cargo run --release -p swiftload-bench -- \
+            --reps 2 --size 33554432 --bps 4000000 \
+            --conns 1,4,8,auto \
+            --json bench.json --report bench.md
+
+      - name: Assert segmentation still pays where it should
+        run: |
+          python3 - <<'PY'
+          import json, statistics, sys
+
+          runs = json.load(open("bench.json"))
+
+          def median(scenario, conns):
+              v = [r["throughput_bps"] for r in runs
+                   if r["scenario"] == scenario and r["conns"] == conns]
+              return statistics.median(v) if v else 0
+
+          one = median("per-connection cap", "1")
+          eight = median("per-connection cap", "8")
+          shared_one = median("shared total cap", "1")
+          shared_eight = median("shared total cap", "8")
+
+          failures = []
+          # Under a per-connection cap, eight connections must clearly beat one. If this
+          # regresses, segmentation has silently stopped working — most likely because every
+          # "parallel" request collapsed onto a single TCP connection.
+          if one and eight / one < 4.0:
+              failures.append(f"per-connection scaling collapsed: 8 conns only {eight/one:.2f}x of 1")
+          # Under a shared cap it must NOT appear to scale. A jump here means the harness is
+          # measuring something other than what it claims.
+          if shared_one and shared_eight / shared_one > 1.5:
+              failures.append(f"shared cap appears to scale ({shared_eight/shared_one:.2f}x) — harness is wrong")
+
+          for f in failures:
+              print(f"::error::{f}")
+          sys.exit(1 if failures else 0)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-report
+          path: |
+            bench.json
+            bench.md
