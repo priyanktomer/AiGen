@@ -179,7 +179,10 @@ impl Governor {
             self.stop_reason = StopReason::RateLimited;
             self.phase = Phase::BackOff;
             self.change_to(k, s.now);
-            return Decision::BackOff { conns: k, wait: retry_after.unwrap_or(Duration::from_secs(1)) };
+            return Decision::BackOff {
+                conns: k,
+                wait: retry_after.unwrap_or(Duration::from_secs(1)),
+            };
         }
 
         // ── Disk-bound. More connections cannot help if the bytes cannot be written.
@@ -222,14 +225,28 @@ impl Governor {
         if s.now.saturating_duration_since(self.changed_at) < self.cfg.warmup {
             return Decision::Hold;
         }
-        let w = self.window.get_or_insert(Window { started: s.now, start_bytes: s.bytes_total });
+        let w = self.window.get_or_insert(Window {
+            started: s.now,
+            start_bytes: s.bytes_total,
+        });
 
         let elapsed = s.now.saturating_duration_since(w.started);
-        if elapsed < self.cfg.dwell {
+        let moved = s.bytes_total.saturating_sub(w.start_bytes);
+
+        // Scale the measurement window to the download.
+        //
+        // A fixed 1.2 s dwell means a full ramp of 4 -> 8 -> 16 costs about five seconds of
+        // measurement. On a download that only lasts two seconds the governor is still
+        // measuring its baseline when the file finishes, so it never ramps at all and adaptive
+        // mode loses badly to a fixed connection count — which is exactly what benchmarking
+        // revealed. When little transfer remains, measure faster and accept the extra noise: a
+        // slightly noisy decision beats no decision.
+        let dwell = self.effective_dwell(elapsed, moved, s.remaining_bytes);
+        if elapsed < dwell {
             return Decision::Hold;
         }
 
-        let bps = (s.bytes_total.saturating_sub(w.start_bytes)) as f64 / elapsed.as_secs_f64();
+        let bps = moved as f64 / elapsed.as_secs_f64();
         let level = self.k;
         self.window = None;
         self.changed_at = s.now;
@@ -256,7 +273,11 @@ impl Governor {
             return self.try_grow(s);
         };
 
-        let gain = if prev_bps > 0.0 { bps / prev_bps - 1.0 } else { 1.0 };
+        let gain = if prev_bps > 0.0 {
+            bps / prev_bps - 1.0
+        } else {
+            1.0
+        };
         // Per-connection throughput ratio: the discriminator. Near 1.0 means each new
         // connection is as productive as the old ones (a per-connection cap). Near 0.5 on a
         // doubling means we are just resharing a fixed pipe.
@@ -275,7 +296,11 @@ impl Governor {
 
         if per_conn <= self.cfg.saturation_ratio {
             self.saturation_detected = true;
-            self.stop_reason = if gain < -0.05 { StopReason::ServerPenalised } else { StopReason::Saturated };
+            self.stop_reason = if gain < -0.05 {
+                StopReason::ServerPenalised
+            } else {
+                StopReason::Saturated
+            };
         } else {
             self.stop_reason = StopReason::Saturated;
         }
@@ -309,6 +334,27 @@ impl Governor {
         Decision::ReleaseToken(settle)
     }
 
+    /// How long this measurement window should run.
+    ///
+    /// Full dwell when there is plenty of download left; shortened, with a floor, when the
+    /// remaining transfer is short enough that a full window would consume it.
+    fn effective_dwell(&self, elapsed: Duration, moved: u64, remaining: u64) -> Duration {
+        const MIN_DWELL: Duration = Duration::from_millis(250);
+        // Need some signal before a rate estimate means anything.
+        if elapsed < MIN_DWELL || moved == 0 {
+            return self.cfg.dwell;
+        }
+        let bps = moved as f64 / elapsed.as_secs_f64();
+        if bps <= 0.0 {
+            return self.cfg.dwell;
+        }
+        let remaining_secs = remaining as f64 / bps;
+        // No single measurement may consume more than a sixth of what is left, so a full ramp
+        // still fits inside the download.
+        let budget = Duration::from_secs_f64((remaining_secs / 6.0).max(MIN_DWELL.as_secs_f64()));
+        budget.min(self.cfg.dwell)
+    }
+
     /// Attempt the next level up, subject to every limit.
     fn try_grow(&mut self, s: &Sample) -> Decision {
         if !s.probe_token {
@@ -336,7 +382,11 @@ impl Governor {
         let next = (self.k * 2).min(limit);
 
         if next <= self.k {
-            self.stop_reason = if by_work <= self.k { StopReason::NotEnoughWork } else { StopReason::ReachedCeiling };
+            self.stop_reason = if by_work <= self.k {
+                StopReason::NotEnoughWork
+            } else {
+                StopReason::ReachedCeiling
+            };
             self.phase = Phase::Hold;
             self.last_probe = s.now;
             return Decision::ReleaseToken(self.k);
@@ -362,7 +412,10 @@ impl Governor {
         if s.remaining_bytes < MIN_SEGMENT * 4 {
             return Decision::Hold;
         }
-        let limit = self.ceiling.min(self.cfg.max_conns).min(self.max_by_work(s.remaining_bytes));
+        let limit = self
+            .ceiling
+            .min(self.cfg.max_conns)
+            .min(self.max_by_work(s.remaining_bytes));
         let next = (self.k + 2).min(limit);
         if next <= self.k {
             return Decision::Hold;
@@ -452,7 +505,10 @@ mod tests {
     }
 
     fn cfg() -> GovernorConfig {
-        GovernorConfig { max_conns: 32, ..Default::default() }
+        GovernorConfig {
+            max_conns: 32,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -467,7 +523,10 @@ mod tests {
             "should have ramped up under a per-connection cap, settled at {}",
             sim.gov.target_conns()
         );
-        assert!(!sim.gov.saturation_detected, "a per-connection cap is not saturation");
+        assert!(
+            !sim.gov.saturation_detected,
+            "a per-connection cap is not saturation"
+        );
     }
 
     #[test]
@@ -481,7 +540,10 @@ mod tests {
             "should not have ramped on a saturated pipe, got {}",
             sim.gov.target_conns()
         );
-        assert!(sim.gov.saturation_detected, "saturation must be detected and remembered");
+        assert!(
+            sim.gov.saturation_detected,
+            "saturation must be detected and remembered"
+        );
         assert_eq!(sim.gov.phase(), Phase::Hold);
     }
 
@@ -490,7 +552,13 @@ mod tests {
         // Throughput actively degrades past 8 connections, as an overloaded or shaping server
         // would behave.
         let mut sim = Sim::new(cfg(), 4);
-        sim.run(240, |k| if k <= 8 { k as f64 * 2_000_000.0 } else { 16_000_000.0 / (k as f64 / 8.0) });
+        sim.run(240, |k| {
+            if k <= 8 {
+                k as f64 * 2_000_000.0
+            } else {
+                16_000_000.0 / (k as f64 / 8.0)
+            }
+        });
 
         assert!(
             sim.gov.target_conns() <= 12,
@@ -516,15 +584,29 @@ mod tests {
             probe_token: true,
         };
         let d = sim.gov.observe(&s);
-        assert_eq!(d, Decision::BackOff { conns: 8, wait: Duration::from_secs(5) });
-        assert_eq!(sim.gov.ceiling(), 8, "the ceiling must come down and stay down");
+        assert_eq!(
+            d,
+            Decision::BackOff {
+                conns: 8,
+                wait: Duration::from_secs(5)
+            }
+        );
+        assert_eq!(
+            sim.gov.ceiling(),
+            8,
+            "the ceiling must come down and stay down"
+        );
         assert_eq!(sim.gov.stop_reason, StopReason::RateLimited);
 
         // And it must never climb back on its own after a rate limit.
         let mut sim2 = Sim::new(cfg(), 8);
         sim2.gov = sim.gov;
         sim2.run(200, |k| k as f64 * 5_000_000.0);
-        assert!(sim2.gov.target_conns() <= 8, "climbed back to {} after a 429", sim2.gov.target_conns());
+        assert!(
+            sim2.gov.target_conns() <= 8,
+            "climbed back to {} after a 429",
+            sim2.gov.target_conns()
+        );
     }
 
     #[test]
@@ -548,7 +630,10 @@ mod tests {
                 probe_token: true,
             };
             let d = sim.gov.observe(&s);
-            assert!(!matches!(d, Decision::SpawnTo(_)), "grew while disk-bound: {d:?}");
+            assert!(
+                !matches!(d, Decision::SpawnTo(_)),
+                "grew while disk-bound: {d:?}"
+            );
         }
         assert_eq!(sim.gov.stop_reason, StopReason::DiskBound);
         assert_eq!(sim.gov.target_conns(), 8, "must stay where it started");
@@ -578,7 +663,10 @@ mod tests {
                 probe_token: true,
             };
             let d = sim.gov.observe(&s);
-            assert!(!matches!(d, Decision::SpawnTo(_)), "grew during a stall: {d:?}");
+            assert!(
+                !matches!(d, Decision::SpawnTo(_)),
+                "grew during a stall: {d:?}"
+            );
         }
 
         assert_eq!(
@@ -628,7 +716,10 @@ mod tests {
                 probe_token: false,
             };
             let d = g.observe(&s);
-            assert!(!matches!(d, Decision::SpawnTo(_)), "ramped without the token: {d:?}");
+            assert!(
+                !matches!(d, Decision::SpawnTo(_)),
+                "ramped without the token: {d:?}"
+            );
         }
         assert_eq!(g.target_conns(), 4);
     }
@@ -639,15 +730,27 @@ mod tests {
         let mut sim = Sim::new(cfg(), 4);
         sim.remaining = 6 * 1024 * 1024;
         sim.run(60, |k| k as f64 * 10_000_000.0);
-        assert!(sim.gov.target_conns() <= 4, "over-split tiny remainder to {}", sim.gov.target_conns());
+        assert!(
+            sim.gov.target_conns() <= 4,
+            "over-split tiny remainder to {}",
+            sim.gov.target_conns()
+        );
     }
 
     #[test]
     fn endgame_reduces_connections() {
         let g = Governor::new(cfg(), 16, Instant::now());
-        assert_eq!(g.endgame_target(1024), Some(1), "one connection for the last KB");
+        assert_eq!(
+            g.endgame_target(1024),
+            Some(1),
+            "one connection for the last KB"
+        );
         assert_eq!(g.endgame_target(3 * 1024 * 1024), Some(2));
-        assert_eq!(g.endgame_target(500 * 1024 * 1024), None, "plenty of work left");
+        assert_eq!(
+            g.endgame_target(500 * 1024 * 1024),
+            None,
+            "plenty of work left"
+        );
     }
 
     #[test]

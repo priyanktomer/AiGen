@@ -117,11 +117,19 @@ mod tests {
     fn parses_content_range() {
         assert_eq!(
             parse_content_range("bytes 0-0/12345"),
-            Some(ContentRange { start: 0, end: 0, total: Some(12345) })
+            Some(ContentRange {
+                start: 0,
+                end: 0,
+                total: Some(12345)
+            })
         );
         assert_eq!(
             parse_content_range("bytes 1000-1999/5000"),
-            Some(ContentRange { start: 1000, end: 1999, total: Some(5000) })
+            Some(ContentRange {
+                start: 1000,
+                end: 1999,
+                total: Some(5000)
+            })
         );
         assert_eq!(parse_content_range("bytes 0-0/12345").unwrap().len(), 1);
     }
@@ -135,8 +143,16 @@ mod tests {
 
     #[test]
     fn rejects_inconsistent_or_malformed_ranges() {
-        assert_eq!(parse_content_range("bytes 100-50/1000"), None, "end before start");
-        assert_eq!(parse_content_range("bytes 0-999/500"), None, "range exceeds stated total");
+        assert_eq!(
+            parse_content_range("bytes 100-50/1000"),
+            None,
+            "end before start"
+        );
+        assert_eq!(
+            parse_content_range("bytes 0-999/500"),
+            None,
+            "range exceeds stated total"
+        );
         assert_eq!(parse_content_range("items 0-1/2"), None, "wrong unit");
         assert_eq!(parse_content_range("garbage"), None);
         assert_eq!(parse_content_range(""), None);
@@ -147,7 +163,10 @@ mod tests {
     fn retry_after_accepts_seconds_and_dates() {
         let cap = Duration::from_secs(120);
         assert_eq!(parse_retry_after("7", cap), Some(Duration::from_secs(7)));
-        assert_eq!(parse_retry_after("  30 ", cap), Some(Duration::from_secs(30)));
+        assert_eq!(
+            parse_retry_after("  30 ", cap),
+            Some(Duration::from_secs(30))
+        );
 
         // A date in the past means "now".
         assert_eq!(
@@ -171,7 +190,10 @@ mod tests {
         assert_eq!(s.as_header(), "\"abc123\"");
 
         let w = Validator::parse("W/\"abc123\"").unwrap();
-        assert!(!w.is_strong(), "weak validators assert equivalence, not byte identity");
+        assert!(
+            !w.is_strong(),
+            "weak validators assert equivalence, not byte identity"
+        );
         assert_eq!(w.raw(), "\"abc123\"");
         assert_eq!(w.as_header(), "W/\"abc123\"");
 

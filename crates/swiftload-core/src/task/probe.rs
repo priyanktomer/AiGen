@@ -61,7 +61,10 @@ impl ProbeResult {
 
     /// Whether this file is worth splitting at all.
     pub fn is_segmentable(&self) -> bool {
-        self.is_resumable() && self.total_size.is_some_and(|s| s >= crate::config::SMALL_FILE_THRESHOLD)
+        self.is_resumable()
+            && self
+                .total_size
+                .is_some_and(|s| s >= crate::config::SMALL_FILE_THRESHOLD)
     }
 
     /// A cheap key for *finding candidate* duplicate downloads.
@@ -129,11 +132,16 @@ pub async fn probe(
     let origin = current.clone();
 
     for hop in 0..=settings.max_redirects {
-        let http = client::build(settings, spec, &current).map_err(|e| ProbeError::Client(e.to_string()))?;
+        let http = client::build(settings, spec, &current)
+            .map_err(|e| ProbeError::Client(e.to_string()))?;
 
         // Strip caller-supplied credentials once we have left the original origin.
         let effective_spec = if redirect::is_cross_origin(&origin, &current) {
-            RequestSpec { cookies: None, headers: strip_auth(&spec.headers), ..spec.clone() }
+            RequestSpec {
+                cookies: None,
+                headers: strip_auth(&spec.headers),
+                ..spec.clone()
+            }
         } else {
             spec.clone()
         };
@@ -151,13 +159,17 @@ pub async fn probe(
 
         if (300..400).contains(&status) {
             if hop == settings.max_redirects {
-                return Err(ProbeError::Redirect(RedirectError::TooMany(settings.max_redirects)));
+                return Err(ProbeError::Redirect(RedirectError::TooMany(
+                    settings.max_redirects,
+                )));
             }
             let location = resp
                 .headers()
                 .get(reqwest::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| ProbeError::Redirect(RedirectError::Malformed("no Location".into())))?
+                .ok_or_else(|| {
+                    ProbeError::Redirect(RedirectError::Malformed("no Location".into()))
+                })?
                 .to_string();
 
             chain.push(redirect::record_hop(&current, status));
@@ -181,7 +193,9 @@ pub async fn probe(
         return Ok(interpret(resp, current, chain));
     }
 
-    Err(ProbeError::Redirect(RedirectError::TooMany(settings.max_redirects)))
+    Err(ProbeError::Redirect(RedirectError::TooMany(
+        settings.max_redirects,
+    )))
 }
 
 fn strip_auth(headers: &[(String, String)]) -> Vec<(String, String)> {
@@ -201,7 +215,9 @@ fn interpret(resp: reqwest::Response, final_url: url::Url, chain: Vec<Hop>) -> P
     let h = resp.headers();
 
     let get = |name: reqwest::header::HeaderName| {
-        h.get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+        h.get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
     };
 
     let content_range = get(reqwest::header::CONTENT_RANGE)
@@ -226,7 +242,9 @@ fn interpret(resp: reqwest::Response, final_url: url::Url, chain: Vec<Hop>) -> P
         // The server ignored our Range and sent the whole body: no range support, and
         // Content-Length is the full size rather than a slice.
         _ => {
-            let advertised_none = accept_ranges.as_deref().is_some_and(|v| v.eq_ignore_ascii_case("none"));
+            let advertised_none = accept_ranges
+                .as_deref()
+                .is_some_and(|v| v.eq_ignore_ascii_case("none"));
             let _ = advertised_none;
             (RangeSupport::Unsupported, content_length)
         }
@@ -240,8 +258,14 @@ fn interpret(resp: reqwest::Response, final_url: url::Url, chain: Vec<Hop>) -> P
         filename: name,
         total_size,
         // Never trust ranges when the body is transformed, whatever the status said.
-        range_support: if transforming_encoding { RangeSupport::Unsupported } else { range_support },
-        etag: get(reqwest::header::ETAG).as_deref().and_then(Validator::parse),
+        range_support: if transforming_encoding {
+            RangeSupport::Unsupported
+        } else {
+            range_support
+        },
+        etag: get(reqwest::header::ETAG)
+            .as_deref()
+            .and_then(Validator::parse),
         last_modified: get(reqwest::header::LAST_MODIFIED),
         disposition_filename: disposition
             .as_deref()
@@ -267,13 +291,21 @@ mod tests {
     fn only_http_and_https_are_downloadable() {
         assert!(validate_url("https://example.com/f").is_ok());
         assert!(validate_url("http://example.com/f").is_ok());
-        for bad in ["file:///etc/passwd", "data:text/plain,x", "javascript:alert(1)", "ftp://h/f"] {
+        for bad in [
+            "file:///etc/passwd",
+            "data:text/plain,x",
+            "javascript:alert(1)",
+            "ftp://h/f",
+        ] {
             assert!(
                 matches!(validate_url(bad), Err(ProbeError::UnsupportedScheme(_))),
                 "{bad} should be refused"
             );
         }
-        assert!(matches!(validate_url("not a url"), Err(ProbeError::InvalidUrl(_))));
+        assert!(matches!(
+            validate_url("not a url"),
+            Err(ProbeError::InvalidUrl(_))
+        ));
     }
 
     #[test]
@@ -327,11 +359,19 @@ mod tests {
         assert_eq!(a.identity_hint(), b.identity_hint());
 
         let c = result_with(Some(1001), RangeSupport::Supported, false);
-        assert_ne!(a.identity_hint(), c.identity_hint(), "size must affect the hint");
+        assert_ne!(
+            a.identity_hint(),
+            c.identity_hint(),
+            "size must affect the hint"
+        );
 
         let mut d = result_with(Some(1000), RangeSupport::Supported, false);
         d.filename = "other.bin".into();
-        assert_ne!(a.identity_hint(), d.identity_hint(), "name must affect the hint");
+        assert_ne!(
+            a.identity_hint(),
+            d.identity_hint(),
+            "name must affect the hint"
+        );
     }
 
     #[test]

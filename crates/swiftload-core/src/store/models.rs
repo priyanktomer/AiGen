@@ -30,7 +30,9 @@ impl DownloadStatus {
             Self::Cancelled => "cancelled",
         }
     }
-    pub fn from_str(s: &str) -> Self {
+    /// Parse a value as stored in the database. Unknown values fall back to a safe default
+    /// rather than failing, so an older or newer schema cannot make a row unreadable.
+    pub fn from_db(s: &str) -> Self {
         match s {
             "active" => Self::Active,
             "paused" => Self::Paused,
@@ -47,7 +49,12 @@ impl DownloadStatus {
     pub fn is_resumable(&self) -> bool {
         matches!(
             self,
-            Self::Queued | Self::Paused | Self::Failed | Self::NeedsAttention | Self::WaitingNetwork | Self::Retrying
+            Self::Queued
+                | Self::Paused
+                | Self::Failed
+                | Self::NeedsAttention
+                | Self::WaitingNetwork
+                | Self::Retrying
         )
     }
 }
@@ -71,7 +78,9 @@ impl ValidationState {
             Self::Rejected => "rejected",
         }
     }
-    pub fn from_str(s: &str) -> Self {
+    /// Parse a value as stored in the database. Unknown values fall back to a safe default
+    /// rather than failing, so an older or newer schema cannot make a row unreadable.
+    pub fn from_db(s: &str) -> Self {
         match s {
             "auto_verified" => Self::AutoVerified,
             "content_verified" => Self::ContentVerified,

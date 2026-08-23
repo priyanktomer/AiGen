@@ -149,10 +149,16 @@ mod tests {
     #[test]
     fn defaults_are_conservative_and_internally_consistent() {
         let s = Settings::default();
-        assert!(s.max_conns_per_download <= 8, "default must not be a connection flood");
+        assert!(
+            s.max_conns_per_download <= 8,
+            "default must not be a connection flood"
+        );
         assert!(s.max_total_conns >= s.max_conns_per_download);
         assert!(s.max_conns_per_host <= s.max_conns_per_download);
-        assert!(s.block_insecure_redirect, "downgrade must be refused by default");
+        assert!(
+            s.block_insecure_redirect,
+            "downgrade must be refused by default"
+        );
         assert!(s.paranoid_recovery);
         assert!(s.apply_motw);
     }
@@ -178,6 +184,9 @@ mod tests {
         // Forward compatibility: an older config file must not fail to load.
         let s: Settings = serde_json::from_str(r#"{"max_conns_per_download": 16}"#).unwrap();
         assert_eq!(s.max_conns_per_download, 16);
-        assert_eq!(s.max_concurrent_downloads, 3, "unspecified fields take defaults");
+        assert_eq!(
+            s.max_concurrent_downloads, 3,
+            "unspecified fields take defaults"
+        );
     }
 }

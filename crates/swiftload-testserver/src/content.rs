@@ -110,13 +110,20 @@ mod tests {
         let a = chunk(seed_of("real"), 0, 4096);
         let b = chunk(seed_of("decoy"), 0, 4096);
         let same = a.iter().zip(&b).filter(|(x, y)| x == y).count();
-        assert!(same < 100, "{same}/4096 bytes collided — seeds are too close");
+        assert!(
+            same < 100,
+            "{same}/4096 bytes collided — seeds are too close"
+        );
     }
 
     #[test]
     fn content_is_not_trivially_compressible_or_constant() {
         let c = chunk(seed_of("delta"), 0, 8192);
         let distinct: std::collections::HashSet<_> = c.iter().collect();
-        assert!(distinct.len() > 200, "only {} distinct byte values", distinct.len());
+        assert!(
+            distinct.len() > 200,
+            "only {} distinct byte values",
+            distinct.len()
+        );
     }
 }

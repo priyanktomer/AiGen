@@ -36,7 +36,11 @@ pub struct Hop {
 }
 
 /// Resolve the next URL for a redirect response, enforcing the safety rules.
-pub fn next_url(current: &url::Url, location: &str, allow_downgrade: bool) -> Result<url::Url, RedirectError> {
+pub fn next_url(
+    current: &url::Url,
+    location: &str,
+    allow_downgrade: bool,
+) -> Result<url::Url, RedirectError> {
     // Relative Locations are legal and common.
     let next = current
         .join(location)
@@ -64,7 +68,10 @@ pub fn is_cross_origin(from: &url::Url, to: &url::Url) -> bool {
 }
 
 pub fn record_hop(url: &url::Url, status: u16) -> Hop {
-    Hop { url: redact(url.as_str()), status }
+    Hop {
+        url: redact(url.as_str()),
+        status,
+    }
 }
 
 #[cfg(test)]
@@ -79,7 +86,9 @@ mod tests {
     fn follows_absolute_and_relative_targets() {
         let cur = u("https://a.example.com/dir/file");
         assert_eq!(
-            next_url(&cur, "https://b.example.com/x", false).unwrap().as_str(),
+            next_url(&cur, "https://b.example.com/x", false)
+                .unwrap()
+                .as_str(),
             "https://b.example.com/x"
         );
         assert_eq!(
@@ -112,7 +121,12 @@ mod tests {
     #[test]
     fn refuses_non_http_schemes() {
         let cur = u("https://example.com/f");
-        for target in ["file:///etc/passwd", "data:text/plain,hi", "javascript:alert(1)", "ftp://x/y"] {
+        for target in [
+            "file:///etc/passwd",
+            "data:text/plain,hi",
+            "javascript:alert(1)",
+            "ftp://x/y",
+        ] {
             let got = next_url(&cur, target, false);
             assert!(
                 matches!(got, Err(RedirectError::UnsupportedScheme(_))),
@@ -124,12 +138,27 @@ mod tests {
     #[test]
     fn detects_cross_origin_hops() {
         let a = u("https://a.example.com/f");
-        assert!(is_cross_origin(&a, &u("https://b.example.com/f")), "different host");
-        assert!(is_cross_origin(&a, &u("http://a.example.com/f")), "different scheme");
-        assert!(is_cross_origin(&a, &u("https://a.example.com:8443/f")), "different port");
+        assert!(
+            is_cross_origin(&a, &u("https://b.example.com/f")),
+            "different host"
+        );
+        assert!(
+            is_cross_origin(&a, &u("http://a.example.com/f")),
+            "different scheme"
+        );
+        assert!(
+            is_cross_origin(&a, &u("https://a.example.com:8443/f")),
+            "different port"
+        );
 
-        assert!(!is_cross_origin(&a, &u("https://a.example.com/other")), "same origin");
-        assert!(!is_cross_origin(&a, &u("https://a.example.com:443/f")), "explicit default port");
+        assert!(
+            !is_cross_origin(&a, &u("https://a.example.com/other")),
+            "same origin"
+        );
+        assert!(
+            !is_cross_origin(&a, &u("https://a.example.com:443/f")),
+            "explicit default port"
+        );
     }
 
     #[test]

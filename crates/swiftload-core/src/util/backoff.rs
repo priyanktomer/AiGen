@@ -80,12 +80,19 @@ mod tests {
         let b = Backoff::default();
         let draws: std::collections::HashSet<_> =
             (0..100).map(|_| b.delay_for(5).as_millis()).collect();
-        assert!(draws.len() > 50, "insufficient jitter spread: {} distinct", draws.len());
+        assert!(
+            draws.len() > 50,
+            "insufficient jitter spread: {} distinct",
+            draws.len()
+        );
     }
 
     #[test]
     fn exhaustion() {
-        let b = Backoff { max_attempts: 3, ..Default::default() };
+        let b = Backoff {
+            max_attempts: 3,
+            ..Default::default()
+        };
         assert!(!b.exhausted(2));
         assert!(b.exhausted(3));
     }

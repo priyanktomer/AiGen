@@ -36,11 +36,7 @@ pub enum FilenameError {
 pub fn sanitize(raw: &str) -> String {
     // 1. Take the last path component only. Strip both separators regardless of platform,
     //    because a server can send either and we always land on Windows.
-    let last = raw
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("")
-        .trim();
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or("").trim();
 
     // 2/3. Drop control characters and Unicode bidi overrides.
     //
@@ -60,7 +56,13 @@ pub fn sanitize(raw: &str) -> String {
         // 4. Windows-invalid characters. ':' matters twice over: besides being invalid in a
         //    path, it opens an NTFS *alternate data stream*, so "report.pdf:payload.exe"
         //    would write a hidden executable stream alongside an innocuous-looking file.
-        .map(|c| if matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') { '_' } else { c })
+        .map(|c| {
+            if matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
 
     // 2 (cont). "." and ".." are traversal, not names.
@@ -138,7 +140,10 @@ pub fn resolve(
     }
 
     // URL path basename, percent-decoded.
-    if let Some(seg) = final_url.path_segments().and_then(|s| s.filter(|s| !s.is_empty()).last()) {
+    if let Some(seg) = final_url
+        .path_segments()
+        .and_then(|mut s| s.rfind(|s| !s.is_empty()))
+    {
         let decoded = percent_decode_str(seg).decode_utf8_lossy().to_string();
         let s = sanitize(&decoded);
         if s != "download" {
@@ -159,7 +164,9 @@ pub fn parse_content_disposition(header: &str) -> Option<String> {
     for part in split_header_params(header) {
         // The disposition type itself ("attachment", "inline") carries no '=' — skip it
         // rather than aborting the whole parse.
-        let Some((key, value)) = part.split_once('=') else { continue };
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
         let key = key.trim().to_ascii_lowercase();
         let value = value.trim();
 
@@ -263,7 +270,9 @@ pub fn resolve_destination(dir: &Path, filename: &str) -> Result<PathBuf, Filena
         return Err(FilenameError::Escapes);
     }
     // A sanitized name is exactly one component; anything else means a rule leaked.
-    let rel = normalized.strip_prefix(&base).map_err(|_| FilenameError::Escapes)?;
+    let rel = normalized
+        .strip_prefix(&base)
+        .map_err(|_| FilenameError::Escapes)?;
     if rel.components().count() != 1 {
         return Err(FilenameError::Escapes);
     }
@@ -342,7 +351,9 @@ mod tests {
         let s = sanitize(spoof);
         assert!(!s.contains('\u{202E}'), "bidi override survived: {s:?}");
         assert_eq!(s, "invoiceexe.docx");
-        for c in ['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{2066}', '\u{2069}', '\u{200E}'] {
+        for c in [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{2066}', '\u{2069}', '\u{200E}',
+        ] {
             assert!(!sanitize(&format!("a{c}b.txt")).contains(c));
         }
     }
@@ -419,7 +430,10 @@ mod tests {
     #[test]
     fn content_disposition_star_wins_over_plain() {
         let h = r#"attachment; filename="fallback.txt"; filename*=UTF-8''caf%C3%A9%20r%C3%A9sum%C3%A9.pdf"#;
-        assert_eq!(parse_content_disposition(h).as_deref(), Some("café résumé.pdf"));
+        assert_eq!(
+            parse_content_disposition(h).as_deref(),
+            Some("café résumé.pdf")
+        );
     }
 
     #[test]
@@ -441,7 +455,10 @@ mod tests {
         assert_eq!(resolve(None, &url, None), "movie.mkv");
 
         let bare = url::Url::parse("https://example.com/").unwrap();
-        assert_eq!(resolve(None, &bare, Some("application/pdf")), "download.pdf");
+        assert_eq!(
+            resolve(None, &bare, Some("application/pdf")),
+            "download.pdf"
+        );
         assert_eq!(resolve(None, &bare, None), "download");
     }
 

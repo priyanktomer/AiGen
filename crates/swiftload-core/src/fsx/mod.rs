@@ -32,7 +32,14 @@ pub fn open_part(path: &Path, total: Option<u64>) -> io::Result<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = OpenOptions::new().create(true).read(true).write(true).open(path)?;
+    // truncate(false) is stated explicitly: silently truncating an existing partial file
+    // would destroy a resume, so the intent should not rest on a default.
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
 
     if let Some(total) = total {
         // Mark sparse *before* extending, so NTFS never zero-fills the whole range.
@@ -83,7 +90,10 @@ pub fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
     while written < buf.len() {
         let n = file.seek_write(&buf[written..], offset + written as u64)?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "seek_write wrote nothing"));
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "seek_write wrote nothing",
+            ));
         }
         written += n;
     }
@@ -132,7 +142,14 @@ pub fn free_space(path: &Path) -> io::Result<u64> {
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.push(0);
     let mut avail = 0u64;
-    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut avail, std::ptr::null_mut(), std::ptr::null_mut()) };
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut avail,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -150,7 +167,7 @@ pub fn free_space(path: &Path) -> io::Result<u64> {
     if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(st.f_bavail as u64 * st.f_frsize as u64)
+    Ok(st.f_bavail * st.f_frsize)
 }
 
 /// Check there is room for `needed` bytes plus a margin, before starting.
@@ -241,7 +258,10 @@ mod tests {
         let f = open_part(&p, Some(4096)).unwrap();
         let mut buf = [0u8; 5];
         read_at(&f, &mut buf, 0).unwrap();
-        assert_eq!(&buf, b"hello", "resume must not truncate what is already there");
+        assert_eq!(
+            &buf, b"hello",
+            "resume must not truncate what is already there"
+        );
     }
 
     #[test]
@@ -305,7 +325,11 @@ mod tests {
 
         let err = finalize(&part, &dest, false).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read(&dest).unwrap(), b"existing", "must not have been touched");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            b"existing",
+            "must not have been touched"
+        );
 
         finalize(&part, &dest, true).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");

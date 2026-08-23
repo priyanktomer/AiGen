@@ -18,12 +18,7 @@ use crate::{
     util::intervals::RangeSet,
 };
 use bytes::Bytes;
-use std::{
-    fs::File,
-    io,
-    sync::Arc,
-    time::Instant,
-};
+use std::{fs::File, io, sync::Arc, time::Instant};
 use tokio::sync::{mpsc, oneshot};
 
 /// Chunks in flight before workers block. 256 x 64 KB caps buffered data at ~16 MB.
@@ -47,7 +42,10 @@ impl CheckpointSink for NullSink {
 }
 
 pub enum WriteMsg {
-    Data { offset: u64, bytes: Bytes },
+    Data {
+        offset: u64,
+        bytes: Bytes,
+    },
     /// Force a durability checkpoint now (pause, or shutdown).
     Sync(oneshot::Sender<io::Result<RangeSet>>),
     /// Final flush; the writer exits afterwards.
@@ -61,7 +59,10 @@ pub struct WriterHandle {
 
 impl WriterHandle {
     pub async fn write(&self, offset: u64, bytes: Bytes) -> Result<(), WriterGone> {
-        self.tx.send(WriteMsg::Data { offset, bytes }).await.map_err(|_| WriterGone)
+        self.tx
+            .send(WriteMsg::Data { offset, bytes })
+            .await
+            .map_err(|_| WriterGone)
     }
 
     /// True when the queue is saturated — the disk cannot keep up with the network.
@@ -82,7 +83,8 @@ impl WriterHandle {
             .send(WriteMsg::Sync(tx))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "writer stopped"))?;
-        rx.await.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "writer stopped"))?
+        rx.await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "writer stopped"))?
     }
 
     pub async fn finish(&self) -> io::Result<RangeSet> {
@@ -91,7 +93,8 @@ impl WriterHandle {
             .send(WriteMsg::Finish(tx))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "writer stopped"))?;
-        rx.await.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "writer stopped"))?
+        rx.await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "writer stopped"))?
     }
 }
 
@@ -145,8 +148,23 @@ async fn run(
                             pending.push((offset, bytes));
                         }
                         Ok(other) => {
-                            flush_pending(&file, &mut pending, &mut pending_bytes, &mut done, &mut since_checkpoint)?;
-                            if handle_control(other, &file, &sink, &done, &mut since_checkpoint, &mut last_checkpoint).await? {
+                            flush_pending(
+                                &file,
+                                &mut pending,
+                                &mut pending_bytes,
+                                &mut done,
+                                &mut since_checkpoint,
+                            )?;
+                            if handle_control(
+                                other,
+                                &file,
+                                &sink,
+                                &done,
+                                &mut since_checkpoint,
+                                &mut last_checkpoint,
+                            )
+                            .await?
+                            {
                                 return Ok(done);
                             }
                             break;
@@ -155,7 +173,13 @@ async fn run(
                     }
                 }
 
-                flush_pending(&file, &mut pending, &mut pending_bytes, &mut done, &mut since_checkpoint)?;
+                flush_pending(
+                    &file,
+                    &mut pending,
+                    &mut pending_bytes,
+                    &mut done,
+                    &mut since_checkpoint,
+                )?;
 
                 let due = since_checkpoint >= CHECKPOINT_BYTES
                     || last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL;
@@ -166,15 +190,36 @@ async fn run(
                 }
             }
             other => {
-                flush_pending(&file, &mut pending, &mut pending_bytes, &mut done, &mut since_checkpoint)?;
-                if handle_control(other, &file, &sink, &done, &mut since_checkpoint, &mut last_checkpoint).await? {
+                flush_pending(
+                    &file,
+                    &mut pending,
+                    &mut pending_bytes,
+                    &mut done,
+                    &mut since_checkpoint,
+                )?;
+                if handle_control(
+                    other,
+                    &file,
+                    &sink,
+                    &done,
+                    &mut since_checkpoint,
+                    &mut last_checkpoint,
+                )
+                .await?
+                {
                     return Ok(done);
                 }
             }
         }
     }
 
-    flush_pending(&file, &mut pending, &mut pending_bytes, &mut done, &mut since_checkpoint)?;
+    flush_pending(
+        &file,
+        &mut pending,
+        &mut pending_bytes,
+        &mut done,
+        &mut since_checkpoint,
+    )?;
     durable_checkpoint(&file, &sink, &done).await?;
     Ok(done)
 }
@@ -276,7 +321,9 @@ pub struct RecordingSink {
 #[cfg(test)]
 impl RecordingSink {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { calls: std::sync::Mutex::new(Vec::new()) })
+        Arc::new(Self {
+            calls: std::sync::Mutex::new(Vec::new()),
+        })
     }
     pub fn last(&self) -> Option<(RangeSet, u64)> {
         self.calls.lock().unwrap().last().cloned()
@@ -289,7 +336,10 @@ impl RecordingSink {
 #[cfg(test)]
 impl CheckpointSink for RecordingSink {
     fn checkpoint(&self, ranges: &RangeSet, bytes_done: u64) -> io::Result<()> {
-        self.calls.lock().unwrap().push((ranges.clone(), bytes_done));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((ranges.clone(), bytes_done));
         Ok(())
     }
 }
@@ -323,7 +373,11 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).unwrap(), b"hello world!");
         assert_eq!(ranges.total(), 12);
-        assert_eq!(ranges.spans(), &[(0, 12)], "contiguous coverage should merge to one span");
+        assert_eq!(
+            ranges.spans(),
+            &[(0, 12)],
+            "contiguous coverage should merge to one span"
+        );
     }
 
     #[tokio::test]
@@ -340,7 +394,10 @@ mod tests {
 
         assert_eq!(ranges.spans(), &[(0, 100), (500, 100)]);
         assert_eq!(ranges.total(), 200);
-        assert!(!ranges.contains_all(0, 1000), "the hole must be visible to the planner");
+        assert!(
+            !ranges.contains_all(0, 1000),
+            "the hole must be visible to the planner"
+        );
     }
 
     #[tokio::test]
@@ -354,7 +411,11 @@ mod tests {
         drop(h);
         join.await.unwrap().unwrap();
 
-        assert_eq!(ranges.spans(), &[(0, 1000)], "prior progress must be carried forward");
+        assert_eq!(
+            ranges.spans(),
+            &[(0, 1000)],
+            "prior progress must be carried forward"
+        );
     }
 
     #[tokio::test]
@@ -365,15 +426,24 @@ mod tests {
         let (h, join) = spawn(file, RangeSet::new(), sink.clone());
 
         for i in 0..10u64 {
-            h.write(i * 1000, Bytes::from(vec![0u8; 1000])).await.unwrap();
+            h.write(i * 1000, Bytes::from(vec![0u8; 1000]))
+                .await
+                .unwrap();
         }
         let final_ranges = h.finish().await.unwrap();
         drop(h);
         join.await.unwrap().unwrap();
 
-        assert!(sink.count() >= 1, "at least the final checkpoint must be recorded");
+        assert!(
+            sink.count() >= 1,
+            "at least the final checkpoint must be recorded"
+        );
         for (ranges, bytes) in sink.calls.lock().unwrap().iter() {
-            assert_eq!(*bytes, ranges.total(), "byte count must agree with coverage");
+            assert_eq!(
+                *bytes,
+                ranges.total(),
+                "byte count must agree with coverage"
+            );
             assert!(
                 ranges.total() <= final_ranges.total(),
                 "a checkpoint claimed {} bytes but only {} were ever written",
@@ -410,7 +480,9 @@ mod tests {
         let (h, join) = spawn(file, RangeSet::new(), RecordingSink::new());
 
         for i in 0..8u64 {
-            h.write(i * 65536, Bytes::from(vec![i as u8; 65536])).await.unwrap();
+            h.write(i * 65536, Bytes::from(vec![i as u8; 65536]))
+                .await
+                .unwrap();
         }
         let ranges = h.finish().await.unwrap();
         drop(h);

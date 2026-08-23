@@ -77,7 +77,8 @@ impl RangeSet {
             let (ls, ll) = self.spans[hi - 1];
             end.max(ls + ll)
         };
-        self.spans.splice(lo..hi, [(merged_start, merged_end - merged_start)]);
+        self.spans
+            .splice(lo..hi, [(merged_start, merged_end - merged_start)]);
     }
 
     /// True when every byte in `[start, end)` is present. An empty range is trivially contained.
@@ -293,7 +294,10 @@ mod tests {
         for &(s, l) in rs.spans() {
             assert!(l > 0, "zero-length span in {rs:?}");
             if let Some(pe) = prev_end {
-                assert!(s > pe, "spans must be sorted, disjoint AND non-adjacent: {rs:?}");
+                assert!(
+                    s > pe,
+                    "spans must be sorted, disjoint AND non-adjacent: {rs:?}"
+                );
             }
             prev_end = Some(s + l);
         }
@@ -319,7 +323,13 @@ mod tests {
 
     #[test]
     fn insert_is_order_independent() {
-        let pairs = [(500u64, 100u64), (0, 100), (200, 100), (100, 100), (300, 100)];
+        let pairs = [
+            (500u64, 100u64),
+            (0, 100),
+            (200, 100),
+            (100, 100),
+            (300, 100),
+        ];
         let a = RangeSet::from_pairs(pairs);
         let mut reversed: Vec<_> = pairs.to_vec();
         reversed.reverse();
@@ -452,13 +462,20 @@ mod tests {
         let rs = RangeSet::from_pairs((0..200).map(|i| (i * 50_000_000u64, 1_000_000u64)));
         assert_eq!(rs.spans().len(), 200);
         // ~7 bytes per fragment: a 4-byte varint gap plus a 3-byte varint length.
-        assert!(rs.encode().len() < 2000, "encoded {} bytes", rs.encode().len());
+        assert!(
+            rs.encode().len() < 2000,
+            "encoded {} bytes",
+            rs.encode().len()
+        );
     }
 
     #[test]
     fn decode_rejects_corrupt_input() {
         assert_eq!(RangeSet::decode(&[0x80]), Err(DecodeError::Truncated));
-        assert_eq!(RangeSet::decode(&[0x00, 0x00]), Err(DecodeError::ZeroLength));
+        assert_eq!(
+            RangeSet::decode(&[0x00, 0x00]),
+            Err(DecodeError::ZeroLength)
+        );
     }
 
     proptest::proptest! {

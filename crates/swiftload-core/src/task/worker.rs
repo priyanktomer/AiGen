@@ -138,7 +138,10 @@ pub async fn run(ctx: WorkerCtx) -> WorkerExit {
             return WorkerExit::Failed(ErrorClass::Fatal);
         }
     };
-    let backoff = Backoff { max_attempts: ctx.settings.max_retries_per_segment, ..Default::default() };
+    let backoff = Backoff {
+        max_attempts: ctx.settings.max_retries_per_segment,
+        ..Default::default()
+    };
 
     loop {
         if ctx.cancel.is_cancelled() {
@@ -211,7 +214,9 @@ async fn fetch_claim(
                 // Rate limiting: obey the server's own figure when it gave one. Never work
                 // around a limit by retrying harder.
                 let wait = match &class {
-                    ErrorClass::RateLimited { retry_after: Some(d) } => *d,
+                    ErrorClass::RateLimited {
+                        retry_after: Some(d),
+                    } => *d,
                     _ => backoff.delay_for(attempt),
                 };
                 attempt += 1;
@@ -244,7 +249,10 @@ async fn stream_once(
 
     let mut req = client::apply_spec(http.get(ctx.url.clone()), &ctx.spec);
     if use_range {
-        req = req.header(reqwest::header::RANGE, format!("bytes={}-{}", start, end - 1));
+        req = req.header(
+            reqwest::header::RANGE,
+            format!("bytes={}-{}", start, end - 1),
+        );
     }
 
     let resp = match req.send().await {
@@ -270,7 +278,11 @@ async fn stream_once(
             // Status 200 at offset 0 just means the server is serving the whole file: that is
             // recoverable by degrading to a single stream. Anywhere else, the server ignored
             // our Range and the body does not belong at our offset.
-            return Err(if start == 0 { ErrorClass::RangeUnsupported } else { ErrorClass::RangeLied });
+            return Err(if start == 0 {
+                ErrorClass::RangeUnsupported
+            } else {
+                ErrorClass::RangeLied
+            });
         }
         let cr = resp
             .headers()
@@ -397,6 +409,10 @@ mod tests {
         assert!(m.current_bps() > 1_000_000);
 
         m.tick(t + Duration::from_secs(60));
-        assert!(m.current_bps() < 100_000, "stalled worker still reports {}", m.current_bps());
+        assert!(
+            m.current_bps() < 100_000,
+            "stalled worker still reports {}",
+            m.current_bps()
+        );
     }
 }

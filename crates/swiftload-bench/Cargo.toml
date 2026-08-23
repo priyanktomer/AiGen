@@ -1,0 +1,26 @@
+[package]
+name = "swiftload-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Benchmark harness for the SwiftLoad engine."
+
+[dependencies]
+swiftload-core = { path = "../swiftload-core" }
+swiftload-testserver = { path = "../swiftload-testserver" }
+tokio.workspace = true
+tokio-util.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_Foundation"] }
+
+[[bin]]
+name = "swiftload-bench"
+path = "src/main.rs"

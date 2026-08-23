@@ -77,7 +77,9 @@ pub struct AppState {
     /// Valid tokens per seed, for the signed-URL scenarios.
     signed: Mutex<HashMap<String, HashSet<String>>>,
     /// Shared token bucket for `per=total` throttling.
-    total_bucket: tokio::sync::Mutex<Option<Bucket>>,
+    /// Shared bucket for `per=total`, tagged with the rate it was built for so a run at a
+    /// different rate cannot inherit the previous run's accumulated tokens.
+    total_bucket: tokio::sync::Mutex<Option<(u64, Bucket)>>,
     /// In-flight streams, for `maxconn` and peak tracking.
     live_streams: AtomicU64,
     peak_streams: AtomicU64,
@@ -142,12 +144,22 @@ struct Bucket {
 
 impl Bucket {
     fn new(rate: f64) -> Self {
-        Self { tokens: rate.min(CHUNK as f64), rate, cap: rate.max(CHUNK as f64), last: Instant::now() }
+        // Burst is deliberately small. A bucket left to accumulate a full second of tokens
+        // while idle hands the next request a large head start, which reads as a baseline well
+        // above the configured cap and quietly invalidates every comparison against it.
+        let burst = (rate / 10.0).max(CHUNK as f64 * 2.0);
+        Self {
+            tokens: burst,
+            rate,
+            cap: burst,
+            last: Instant::now(),
+        }
     }
     /// Time to wait before `n` bytes may be sent, consuming them.
     fn reserve(&mut self, n: u64) -> Duration {
         let now = Instant::now();
-        self.tokens = (self.tokens + now.duration_since(self.last).as_secs_f64() * self.rate).min(self.cap);
+        self.tokens =
+            (self.tokens + now.duration_since(self.last).as_secs_f64() * self.rate).min(self.cap);
         self.last = now;
         self.tokens -= n as f64;
         if self.tokens >= 0.0 {
@@ -276,7 +288,12 @@ async fn h_plain(
     Query(q): Query<Q>,
     headers: HeaderMap,
 ) -> Response {
-    serve(st, Scenario::plain(content::seed_of(&seed), size).with_q(&q), &headers).await
+    serve(
+        st,
+        Scenario::plain(content::seed_of(&seed), size).with_q(&q),
+        &headers,
+    )
+    .await
 }
 
 async fn h_norange(
@@ -386,17 +403,33 @@ async fn h_signed(
         st.stats.status_403.fetch_add(1, Ordering::Relaxed);
         return (StatusCode::FORBIDDEN, "signature expired or invalid").into_response();
     }
-    serve(st, Scenario::plain(content::seed_of(&seed), size).with_q(&q), &headers).await
+    serve(
+        st,
+        Scenario::plain(content::seed_of(&seed), size).with_q(&q),
+        &headers,
+    )
+    .await
 }
 
 /// Issue a fresh signed URL for the same underlying content — "the user got a new link".
-async fn h_mint(State(st): State<Arc<AppState>>, Path(seed): Path<String>, Query(q): Query<Q>) -> Response {
+async fn h_mint(
+    State(st): State<Arc<AppState>>,
+    Path(seed): Path<String>,
+    Query(q): Query<Q>,
+) -> Response {
     let token: String = {
         use rand::Rng;
         let mut rng = rand::rng();
-        (0..24).map(|_| char::from(b'a' + rng.random_range(0..26))).collect()
+        (0..24)
+            .map(|_| char::from(b'a' + rng.random_range(0..26)))
+            .collect()
     };
-    st.signed.lock().unwrap().entry(seed.clone()).or_default().insert(token.clone());
+    st.signed
+        .lock()
+        .unwrap()
+        .entry(seed.clone())
+        .or_default()
+        .insert(token.clone());
     let size = q.n.unwrap_or(1 << 20);
     let base = st.base_url.lock().unwrap().clone();
     let url = format!("{base}/signed/{seed}/{size}?token={token}&expires=9999999999");
@@ -420,7 +453,11 @@ async fn h_redirect(Path((hops, seed, size)): Path<(u32, String, u64)>) -> Respo
     (StatusCode::FOUND, h).into_response()
 }
 
-async fn h_status(State(st): State<Arc<AppState>>, Path(code): Path<u16>, Query(q): Query<Q>) -> Response {
+async fn h_status(
+    State(st): State<Arc<AppState>>,
+    Path(code): Path<u16>,
+    Query(q): Query<Q>,
+) -> Response {
     match code {
         403 => st.stats.status_403.fetch_add(1, Ordering::Relaxed),
         429 => st.stats.status_429.fetch_add(1, Ordering::Relaxed),
@@ -430,7 +467,10 @@ async fn h_status(State(st): State<Arc<AppState>>, Path(code): Path<u16>, Query(
     let mut h = HeaderMap::new();
     if matches!(code, 429 | 503) {
         // Retry-After must be honoured rather than routed around with more connections.
-        h.insert(header::RETRY_AFTER, HeaderValue::from_str(&q.n.unwrap_or(1).to_string()).unwrap());
+        h.insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_str(&q.n.unwrap_or(1).to_string()).unwrap(),
+        );
     }
     (status, h, format!("status {code}")).into_response()
 }
@@ -509,23 +549,38 @@ async fn serve(st: Arc<AppState>, sc: Scenario, headers: &HeaderMap) -> Response
             RangeMode::No => "none",
         }),
     );
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
 
     if sc.advertise_len {
-        h.insert(header::CONTENT_LENGTH, HeaderValue::from_str(&body_len.to_string()).unwrap());
+        h.insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&body_len.to_string()).unwrap(),
+        );
     }
     match sc.etag {
         EtagMode::Stable => {
-            h.insert(header::ETAG, HeaderValue::from_str(&format!("\"{:016x}\"", sc.seed)).unwrap());
+            h.insert(
+                header::ETAG,
+                HeaderValue::from_str(&format!("\"{:016x}\"", sc.seed)).unwrap(),
+            );
         }
         EtagMode::Rotate => {
             let n = st.etag_tick.fetch_add(1, Ordering::Relaxed);
-            h.insert(header::ETAG, HeaderValue::from_str(&format!("\"rot-{n:08x}\"")).unwrap());
+            h.insert(
+                header::ETAG,
+                HeaderValue::from_str(&format!("\"rot-{n:08x}\"")).unwrap(),
+            );
         }
         EtagMode::None => {}
     }
     if sc.last_modified {
-        h.insert(header::LAST_MODIFIED, HeaderValue::from_static("Wed, 01 Jan 2025 00:00:00 GMT"));
+        h.insert(
+            header::LAST_MODIFIED,
+            HeaderValue::from_static("Wed, 01 Jan 2025 00:00:00 GMT"),
+        );
     }
     if let Some(name) = &sc.filename {
         h.insert(
@@ -550,15 +605,16 @@ async fn serve(st: Arc<AppState>, sc: Scenario, headers: &HeaderMap) -> Response
         StatusCode::OK
     };
 
-    if sc.per_total && sc.bps.is_some() {
+    if let (true, Some(rate)) = (sc.per_total, sc.bps) {
         let mut b = st.total_bucket.lock().await;
-        if b.is_none() {
-            *b = Some(Bucket::new(sc.bps.unwrap() as f64));
+        if b.as_ref().is_none_or(|(r, _)| *r != rate) {
+            *b = Some((rate, Bucket::new(rate as f64)));
         }
     }
 
     st.live_streams.fetch_add(1, Ordering::Relaxed);
-    st.peak_streams.fetch_max(st.live_streams.load(Ordering::Relaxed), Ordering::Relaxed);
+    st.peak_streams
+        .fetch_max(st.live_streams.load(Ordering::Relaxed), Ordering::Relaxed);
 
     let body = Body::from_stream(body_stream(st, sc, start, body_len));
     (status, h, body).into_response()
@@ -593,7 +649,11 @@ fn body_stream(
         sent: 0,
         done: false,
         first: true,
-        bucket: if sc.per_total { None } else { sc.bps.map(|b| Bucket::new(b as f64)) },
+        bucket: if sc.per_total {
+            None
+        } else {
+            sc.bps.map(|b| Bucket::new(b as f64))
+        },
         _guard: Guard(st.clone()),
     };
 
@@ -624,10 +684,8 @@ fn body_stream(
                 if s.sent >= at {
                     st.stats.resets_injected.fetch_add(1, Ordering::Relaxed);
                     s.done = true;
-                    let err = std::io::Error::new(
-                        std::io::ErrorKind::ConnectionReset,
-                        "injected reset",
-                    );
+                    let err =
+                        std::io::Error::new(std::io::ErrorKind::ConnectionReset, "injected reset");
                     return Some((Err(err), s));
                 }
             }
@@ -641,12 +699,18 @@ fn body_stream(
                 match sc.bps {
                     Some(rate) => {
                         let mut g = st.total_bucket.lock().await;
-                        g.get_or_insert_with(|| Bucket::new(rate as f64)).reserve(n as u64)
+                        if g.as_ref().is_none_or(|(r, _)| *r != rate) {
+                            *g = Some((rate, Bucket::new(rate as f64)));
+                        }
+                        g.as_mut()
+                            .map_or(Duration::ZERO, |(_, b)| b.reserve(n as u64))
                     }
                     None => Duration::ZERO,
                 }
             } else {
-                s.bucket.as_mut().map_or(Duration::ZERO, |b| b.reserve(n as u64))
+                s.bucket
+                    .as_mut()
+                    .map_or(Duration::ZERO, |b| b.reserve(n as u64))
             };
             if !wait.is_zero() {
                 tokio::time::sleep(wait).await;
@@ -721,7 +785,10 @@ pub async fn spawn(addr: SocketAddr) -> std::io::Result<Handle> {
     *state.base_url.lock().unwrap() = format!("http://{bound}");
 
     let app = router(state.clone());
-    let counting = CountingListener { inner: listener, stats: state.clone() };
+    let counting = CountingListener {
+        inner: listener,
+        stats: state.clone(),
+    };
     tokio::spawn(async move {
         let _ = axum::serve(counting, app).await;
     });
@@ -763,6 +830,9 @@ mod tests {
         for _ in 0..40 {
             total += b.reserve(64 * 1024);
         }
-        assert!(total > Duration::from_millis(500), "throttle produced only {total:?}");
+        assert!(
+            total > Duration::from_millis(500),
+            "throttle produced only {total:?}"
+        );
     }
 }

@@ -59,7 +59,10 @@ mod tests {
 
     #[test]
     fn includes_the_referrer_when_known() {
-        let c = zone_identifier_content("https://cdn.example.com/f.exe", Some("https://example.com/page"));
+        let c = zone_identifier_content(
+            "https://cdn.example.com/f.exe",
+            Some("https://example.com/page"),
+        );
         assert!(c.contains("ReferrerUrl=https://example.com/page"));
     }
 

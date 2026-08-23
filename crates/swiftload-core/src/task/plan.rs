@@ -109,7 +109,13 @@ impl Plan {
             // Unknown size: one open-ended claim from where we left off.
             None => vec![(completed.end(), u64::MAX - completed.end())],
         };
-        Self { total, inner: Mutex::new(Inner { free, slots: Vec::new() }) }
+        Self {
+            total,
+            inner: Mutex::new(Inner {
+                free,
+                slots: Vec::new(),
+            }),
+        }
     }
 
     /// Split the outstanding work into up to `n` initial claims.
@@ -121,11 +127,8 @@ impl Plan {
         // Split the largest gaps until we have enough pieces to occupy `n` workers, never
         // producing a piece smaller than a minimum segment.
         while g.free.len() < n {
-            let Some((idx, &(start, len))) = g
-                .free
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, &(_, len))| len)
+            let Some((idx, &(start, len))) =
+                g.free.iter().enumerate().max_by_key(|(_, &(_, len))| len)
             else {
                 break;
             };
@@ -148,14 +151,25 @@ impl Plan {
 
     /// Work not yet claimed by any worker.
     pub fn unclaimed(&self) -> u64 {
-        self.inner.lock().unwrap().free.iter().map(|&(_, l)| l).sum()
+        self.inner
+            .lock()
+            .unwrap()
+            .free
+            .iter()
+            .map(|&(_, l)| l)
+            .sum()
     }
 
     /// Everything still outstanding: unclaimed plus what live workers hold.
     pub fn outstanding(&self) -> u64 {
         let g = self.inner.lock().unwrap();
         let free: u64 = g.free.iter().map(|&(_, l)| l).sum();
-        let held: u64 = g.slots.iter().filter(|s| s.is_active()).map(|s| s.remaining()).sum();
+        let held: u64 = g
+            .slots
+            .iter()
+            .filter(|s| s.is_active())
+            .map(|s| s.remaining())
+            .sum();
         free + held
     }
 
@@ -217,7 +231,11 @@ impl Plan {
             g.free.sort_unstable_by_key(|&(s, _)| s);
             merge_free(&mut g.free);
         }
-        self.inner.lock().unwrap().slots.retain(|s| !Arc::ptr_eq(s, slot) || s.is_active());
+        self.inner
+            .lock()
+            .unwrap()
+            .slots
+            .retain(|s| !Arc::ptr_eq(s, slot) || s.is_active());
     }
 
     /// Return a range to the pool after a failure, so another worker can retry it.
@@ -282,7 +300,11 @@ mod tests {
         // The property that makes resume work: already-downloaded bytes are never re-fetched.
         let done = RangeSet::from_pairs([(0, 30 * MB), (60 * MB, 40 * MB)]);
         let p = Plan::new(Some(100 * MB), &done);
-        assert_eq!(p.unclaimed(), 30 * MB, "only the hole from 30 MB to 60 MB is outstanding");
+        assert_eq!(
+            p.unclaimed(),
+            30 * MB,
+            "only the hole from 30 MB to 60 MB is outstanding"
+        );
 
         let c = take(&p);
         assert_eq!((c.cursor(), c.end()), (30 * MB, 60 * MB));
@@ -312,7 +334,11 @@ mod tests {
         p.seed(8);
         assert!(p.unclaimed() == 3 * MB);
         let first = take(&p);
-        assert!(first.remaining() >= MIN_SEGMENT, "produced a sliver of {}", first.remaining());
+        assert!(
+            first.remaining() >= MIN_SEGMENT,
+            "produced a sliver of {}",
+            first.remaining()
+        );
     }
 
     #[test]
@@ -327,7 +353,11 @@ mod tests {
         assert!(a.end() < 100 * MB, "victim's end should have been lowered");
         assert_eq!(a.end(), b.cursor(), "the split must be seamless");
         assert_eq!(b.end(), 100 * MB);
-        assert_eq!(a.remaining() + b.remaining(), 100 * MB, "no bytes lost or duplicated");
+        assert_eq!(
+            a.remaining() + b.remaining(),
+            100 * MB,
+            "no bytes lost or duplicated"
+        );
     }
 
     #[test]
@@ -338,7 +368,11 @@ mod tests {
         a.advance(80 * MB);
 
         let b = take(&p);
-        assert!(b.cursor() >= 80 * MB, "stole work that was already fetched: {}", b.cursor());
+        assert!(
+            b.cursor() >= 80 * MB,
+            "stole work that was already fetched: {}",
+            b.cursor()
+        );
         assert_eq!(a.end(), b.cursor());
         assert_eq!(a.remaining() + b.remaining(), 20 * MB);
     }
@@ -352,7 +386,10 @@ mod tests {
 
         // The worker keeps streaming and simply notices at the next chunk boundary.
         a.advance(new_end);
-        assert!(a.is_done(), "worker must stop once it passes its lowered end");
+        assert!(
+            a.is_done(),
+            "worker must stop once it passes its lowered end"
+        );
         assert_eq!(a.remaining(), 0);
     }
 
@@ -398,7 +435,11 @@ mod tests {
 
         p.return_range(0, 10 * MB);
         p.return_range(10 * MB, 10 * MB);
-        assert_eq!(p.unclaimed(), 100 * MB, "overlapping returns must not double-count");
+        assert_eq!(
+            p.unclaimed(),
+            100 * MB,
+            "overlapping returns must not double-count"
+        );
     }
 
     #[test]
@@ -421,7 +462,11 @@ mod tests {
 
         let a = take(&p);
         a.advance(99 * MB);
-        assert_eq!(p.useful_workers(), 1, "1 MB left cannot occupy several connections");
+        assert_eq!(
+            p.useful_workers(),
+            1,
+            "1 MB left cannot occupy several connections"
+        );
     }
 
     #[test]

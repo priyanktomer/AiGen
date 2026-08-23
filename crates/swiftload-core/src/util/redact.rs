@@ -83,9 +83,15 @@ mod tests {
         let got = r("https://ex.com/f.zip?token=SECRET&expires=12345");
         assert!(!got.contains("SECRET"), "{got}");
         assert!(!got.contains("12345"), "{got}");
-        assert!(got.contains("token="), "parameter name should survive: {got}");
+        assert!(
+            got.contains("token="),
+            "parameter name should survive: {got}"
+        );
         assert!(got.contains("expires="), "{got}");
-        assert_eq!(got, "https://ex.com/f.zip?token=%3Credacted%3E&expires=%3Credacted%3E");
+        assert_eq!(
+            got,
+            "https://ex.com/f.zip?token=%3Credacted%3E&expires=%3Credacted%3E"
+        );
     }
 
     #[test]
@@ -94,7 +100,12 @@ mod tests {
                   &X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20240101%2Fus-east-1%2Fs3%2Faws4_request\
                   &X-Amz-Signature=deadbeefcafe&X-Amz-SecurityToken=FQoGZ";
         let got = r(s3);
-        for secret in ["AKIAIOSFODNN7EXAMPLE", "deadbeefcafe", "FQoGZ", "aws4_request"] {
+        for secret in [
+            "AKIAIOSFODNN7EXAMPLE",
+            "deadbeefcafe",
+            "FQoGZ",
+            "aws4_request",
+        ] {
             assert!(!got.contains(secret), "leaked {secret} in {got}");
         }
         assert!(got.contains("X-Amz-Signature="));
@@ -102,12 +113,14 @@ mod tests {
 
     #[test]
     fn redacts_azure_sas_and_gcs() {
-        let azure = "https://a.blob.core.windows.net/c/b.zip?sv=2021-06-08&sr=b&sig=abc%2Bdef&se=2024";
+        let azure =
+            "https://a.blob.core.windows.net/c/b.zip?sv=2021-06-08&sr=b&sig=abc%2Bdef&se=2024";
         let got = r(azure);
         assert!(!got.contains("abc"), "{got}");
         assert!(!got.contains("2021-06-08"), "{got}");
 
-        let gcs = "https://storage.googleapis.com/b/o?GoogleAccessId=x@y.iam&Expires=1&Signature=ZZZ";
+        let gcs =
+            "https://storage.googleapis.com/b/o?GoogleAccessId=x@y.iam&Expires=1&Signature=ZZZ";
         let got = r(gcs);
         assert!(!got.contains("ZZZ") && !got.contains("x@y.iam"), "{got}");
     }
@@ -122,7 +135,10 @@ mod tests {
 
     #[test]
     fn urls_without_a_query_are_unchanged_in_substance() {
-        assert_eq!(r("https://ex.com/path/file.zip"), "https://ex.com/path/file.zip");
+        assert_eq!(
+            r("https://ex.com/path/file.zip"),
+            "https://ex.com/path/file.zip"
+        );
     }
 
     #[test]

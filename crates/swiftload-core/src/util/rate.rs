@@ -180,7 +180,11 @@ mod tests {
 
         m.record(1_000_000, start + Duration::from_millis(1500));
         m.record(0, start + Duration::from_millis(2000));
-        assert_eq!(m.peak_bps(), after_first, "a slower window must not lower the peak");
+        assert_eq!(
+            m.peak_bps(),
+            after_first,
+            "a slower window must not lower the peak"
+        );
     }
 
     #[test]
@@ -191,7 +195,11 @@ mod tests {
         let mut m = SpeedMeter::new();
         m.record(1_000_000, start); // 1 MB delivered "instantly"
         m.record(0, start + Duration::from_secs(1));
-        assert!(m.peak_bps() <= 1_100_000, "burst inflated peak to {}", m.peak_bps());
+        assert!(
+            m.peak_bps() <= 1_100_000,
+            "burst inflated peak to {}",
+            m.peak_bps()
+        );
     }
 
     #[test]
@@ -230,7 +238,11 @@ mod tests {
         assert!(before > 1_000_000);
 
         m.tick(start + Duration::from_secs(30));
-        assert!(m.current_bps() < before / 100, "stalled meter stayed at {}", m.current_bps());
+        assert!(
+            m.current_bps() < before / 100,
+            "stalled meter stayed at {}",
+            m.current_bps()
+        );
     }
 
     #[test]
@@ -256,7 +268,11 @@ mod tests {
         let start = t0();
         let mut b = TokenBucket::new(1_000_000); // 1 MB/s
         assert_eq!(b.take(500_000, start), 500_000);
-        assert_eq!(b.take(1_000_000, start), 500_000, "only the remaining tokens");
+        assert_eq!(
+            b.take(1_000_000, start),
+            500_000,
+            "only the remaining tokens"
+        );
         assert_eq!(b.take(1_000, start), 0, "bucket is empty");
 
         // Half a second later, half a megabyte has refilled.

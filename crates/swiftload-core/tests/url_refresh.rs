@@ -40,7 +40,11 @@ impl CheckpointSink for MemSink {
 }
 
 fn settings(dir: &std::path::Path) -> Settings {
-    Settings { download_dir: dir.to_path_buf(), hash_on_complete: false, ..Default::default() }
+    Settings {
+        download_dir: dir.to_path_buf(),
+        hash_on_complete: false,
+        ..Default::default()
+    }
 }
 
 fn client() -> reqwest::Client {
@@ -57,26 +61,38 @@ fn assert_content(path: &std::path::Path, seed: &str, size: u64) {
     }
 }
 
-/// Start a download and interrupt it partway, returning what was checkpointed.
+/// Start a download and interrupt it once a target amount has been checkpointed.
 ///
-/// Asserts the result really is partial: several of these tests are meaningless if the
-/// download happened to finish before the interruption landed.
-async fn partial_download(
+/// Cancellation is driven by **observed progress**, not by a wall-clock timer. A fixed sleep
+/// makes these tests flaky the moment the machine is loaded or the engine gets faster: the
+/// download either finishes early (and the test asserts on a complete file) or barely starts.
+/// Watching the checkpoint sink instead makes the interruption land in the same place every
+/// time, on any machine.
+async fn partial_download_to(
     url: &str,
     dir: &std::path::Path,
     name: &str,
-    ms: u64,
+    stop_after: u64,
 ) -> (RangeSet, ResourceSignals) {
     let s = settings(dir);
-    let pr = probe(url, &s, &RequestSpec::default(), false).await.unwrap();
+    let pr = probe(url, &s, &RequestSpec::default(), false)
+        .await
+        .unwrap();
     let old = ResourceSignals::from_probe(&pr);
 
     let sink = MemSink::new();
     let cancel = CancellationToken::new();
     {
         let cancel = cancel.clone();
+        let sink = sink.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            // Generous ceiling so a genuinely stuck download fails the test rather than hanging.
+            for _ in 0..600 {
+                if sink.ranges().total() >= stop_after {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
             cancel.cancel();
         });
     }
@@ -86,17 +102,34 @@ async fn partial_download(
     let _ = download(req, s, sink.clone(), cancel, None).await;
 
     let ranges = sink.ranges();
-    assert!(ranges.total() > 0, "nothing was downloaded before the interruption");
+    assert!(
+        ranges.total() > 0,
+        "nothing was downloaded before the interruption"
+    );
     if let Some(total) = pr.total_size {
         assert!(
             ranges.total() < total,
-            "the download finished ({} of {total} bytes) before it could be interrupted — \
-             lower the throttle so the test exercises what it claims to",
+            "the download finished ({} of {total} bytes) before it could be interrupted",
             ranges.total()
         );
     }
-    assert!(dir.join(format!("{name}.slpart")).exists(), "no partial file was left behind");
+    assert!(
+        dir.join(format!("{name}.slpart")).exists(),
+        "no partial file was left behind"
+    );
     (ranges, old)
+}
+
+/// Interrupt after roughly a quarter of the file, which every test here wants.
+async fn partial_download(
+    url: &str,
+    dir: &std::path::Path,
+    name: &str,
+    _ms: u64,
+) -> (RangeSet, ResourceSignals) {
+    // One byte is enough: the first checkpoint lands at 8 MiB, roughly a quarter of the file,
+    // which is what every test here wants and is stable regardless of machine speed.
+    partial_download_to(url, dir, name, 1).await
 }
 
 const SIZE: u64 = 32 * 1024 * 1024;
@@ -108,18 +141,35 @@ async fn expired_link_is_replaced_and_the_download_resumes() {
     let dir = tempfile::tempdir().unwrap();
     let c = client();
 
-    let url = c.get(h.url(&format!("/mint/alpha?n={SIZE}"))).send().await.unwrap().text().await.unwrap();
+    let url = c
+        .get(h.url(&format!("/mint/alpha?n={SIZE}")))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     let throttled = format!("{url}&bps=1500000&per=conn");
 
     let (partial, old) = partial_download(&throttled, dir.path(), "movie.mkv", 1500).await;
-    assert!(partial.total() < SIZE, "the download completed before it could be interrupted");
+    assert!(
+        partial.total() < SIZE,
+        "the download completed before it could be interrupted"
+    );
 
     // The link expires while the download is paused.
     c.get(h.url("/expire/alpha")).send().await.unwrap();
     assert_eq!(c.get(&url).send().await.unwrap().status(), 403);
 
     // The user obtains a fresh link for the same file.
-    let fresh = c.get(h.url(&format!("/mint/alpha?n={SIZE}"))).send().await.unwrap().text().await.unwrap();
+    let fresh = c
+        .get(h.url(&format!("/mint/alpha?n={SIZE}")))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     assert_ne!(fresh, url);
 
     let part = dir.path().join("movie.mkv.slpart");
@@ -137,7 +187,11 @@ async fn expired_link_is_replaced_and_the_download_resumes() {
     .await
     .unwrap();
 
-    assert!(report.verdict.is_safe_to_resume(), "same file should resume without a prompt: {:?}", report.verdict);
+    assert!(
+        report.verdict.is_safe_to_resume(),
+        "same file should resume without a prompt: {:?}",
+        report.verdict
+    );
     assert!(
         report.bytes_verified <= 1024 * 1024,
         "validation transferred {} bytes; the budget is 1 MB",
@@ -149,11 +203,21 @@ async fn expired_link_is_replaced_and_the_download_resumes() {
     req.filename = Some("movie.mkv".into());
     req.max_conns = Some(4);
     req.completed = partial.clone();
-    let o = download(req, settings(dir.path()), MemSink::new(), CancellationToken::new(), None)
-        .await
-        .unwrap();
+    let o = download(
+        req,
+        settings(dir.path()),
+        MemSink::new(),
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(o.resumed_from, partial.total(), "existing bytes must be kept");
+    assert_eq!(
+        o.resumed_from,
+        partial.total(),
+        "existing bytes must be kept"
+    );
     assert_eq!(o.bytes, SIZE);
     assert_content(&o.path, "alpha", SIZE);
 
@@ -189,13 +253,22 @@ async fn a_decoy_with_matching_size_is_rejected_on_content() {
     .unwrap();
 
     assert!(
-        matches!(report.verdict, Verdict::Reject(RejectReason::ContentMismatch { .. })),
+        matches!(
+            report.verdict,
+            Verdict::Reject(RejectReason::ContentMismatch { .. })
+        ),
         "decoy was not rejected: {:?}",
         report.verdict
     );
     assert!(!report.verdict.is_safe_to_resume());
-    assert!(!report.verdict.needs_user(), "a rejection must offer no confirmation path");
-    assert!(report.windows_checked > 0, "content must actually have been compared");
+    assert!(
+        !report.verdict.needs_user(),
+        "a rejection must offer no confirmation path"
+    );
+    assert!(
+        report.windows_checked > 0,
+        "content must actually have been compared"
+    );
 }
 
 /// Test 6: a different size is refused before any content is fetched.
@@ -221,11 +294,17 @@ async fn a_size_mismatch_is_rejected_without_spending_traffic() {
     .unwrap();
 
     assert!(
-        matches!(report.verdict, Verdict::Reject(RejectReason::SizeMismatch { .. })),
+        matches!(
+            report.verdict,
+            Verdict::Reject(RejectReason::SizeMismatch { .. })
+        ),
         "{:?}",
         report.verdict
     );
-    assert_eq!(report.bytes_verified, 0, "size alone settles it; no content should be fetched");
+    assert_eq!(
+        report.bytes_verified, 0,
+        "size alone settles it; no content should be fetched"
+    );
 }
 
 /// Test 7: the ETag rotates but the content is identical — the case that must not be rejected.
@@ -253,7 +332,10 @@ async fn a_rotated_etag_verifies_by_content_and_asks_the_user() {
 
     match &report.verdict {
         Verdict::Confirm(ev) => {
-            assert!(ev.etag_changed, "the changed tag should be part of the evidence");
+            assert!(
+                ev.etag_changed,
+                "the changed tag should be part of the evidence"
+            );
             assert!(ev.size_matches);
             assert_eq!(ev.windows_verified, report.windows_checked);
             // The prompt must be readable by someone who has never heard of an ETag.
@@ -269,9 +351,15 @@ async fn a_rotated_etag_verifies_by_content_and_asks_the_user() {
     let mut req = DownloadRequest::new(rotated, dir.path());
     req.filename = Some("movie.mkv".into());
     req.completed = partial;
-    let o = download(req, settings(dir.path()), MemSink::new(), CancellationToken::new(), None)
-        .await
-        .unwrap();
+    let o = download(
+        req,
+        settings(dir.path()),
+        MemSink::new(),
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .unwrap();
     assert_content(&o.path, "rot", SIZE);
 }
 
@@ -298,7 +386,10 @@ async fn a_replacement_without_range_support_offers_restart_only() {
     .unwrap();
 
     assert_eq!(report.verdict, Verdict::RestartOnly);
-    assert!(report.verdict.needs_user(), "the user must choose; never silently re-download");
+    assert!(
+        report.verdict.needs_user(),
+        "the user must choose; never silently re-download"
+    );
     assert!(
         dir.path().join("movie.mkv.slpart").exists(),
         "the partial file must be preserved regardless of the choice"
@@ -312,17 +403,41 @@ async fn a_chain_of_replacements_keeps_one_download() {
     let dir = tempfile::tempdir().unwrap();
     let c = client();
 
-    let first = c.get(h.url(&format!("/mint/chain?n={SIZE}"))).send().await.unwrap().text().await.unwrap();
-    let (mut partial, old) =
-        partial_download(&format!("{first}&bps=1500000&per=conn"), dir.path(), "movie.mkv", 1200).await;
+    let first = c
+        .get(h.url(&format!("/mint/chain?n={SIZE}")))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let (mut partial, old) = partial_download(
+        &format!("{first}&bps=1500000&per=conn"),
+        dir.path(),
+        "movie.mkv",
+        1200,
+    )
+    .await;
     let part = dir.path().join("movie.mkv.slpart");
 
     let mut totals = vec![partial.total()];
 
-    // Expire and replace three more times, downloading a little further each round.
-    for round in 0..3 {
+    // Expire and replace twice more, advancing by one checkpoint each round.
+    //
+    // Two rounds, not three: progress is only observable at checkpoint granularity (8 MiB), so
+    // each round advances by about that much. A third round would finish the 32 MiB file, and a
+    // completed download renames its .slpart away — after which the final step legitimately has
+    // nothing to resume from and the test would be asserting against its own setup.
+    for round in 0..2 {
         c.get(h.url("/expire/chain")).send().await.unwrap();
-        let fresh = c.get(h.url(&format!("/mint/chain?n={SIZE}"))).send().await.unwrap().text().await.unwrap();
+        let fresh = c
+            .get(h.url(&format!("/mint/chain?n={SIZE}")))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
 
         let report = validate_replacement_url(
             &fresh,
@@ -335,14 +450,29 @@ async fn a_chain_of_replacements_keeps_one_download() {
         )
         .await
         .unwrap();
-        assert!(report.verdict.is_safe_to_resume(), "round {round}: {:?}", report.verdict);
+        assert!(
+            report.verdict.is_safe_to_resume(),
+            "round {round}: {:?}",
+            report.verdict
+        );
 
         let sink = MemSink::new();
         let cancel = CancellationToken::new();
         {
+            // Stop at the first checkpoint past what we carried in. Keyed on observed
+            // progress rather than a timer, so machine load cannot change where it lands.
+            let target = partial.total() + 1;
             let cancel = cancel.clone();
+            let sink = sink.clone();
+            let carried = partial.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                for _ in 0..600 {
+                    let seen = sink.ranges().total().max(carried.total());
+                    if seen >= target {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
                 cancel.cancel();
             });
         }
@@ -365,21 +495,37 @@ async fn a_chain_of_replacements_keeps_one_download() {
 
     // Finish on a final fresh link.
     c.get(h.url("/expire/chain")).send().await.unwrap();
-    let last = c.get(h.url(&format!("/mint/chain?n={SIZE}"))).send().await.unwrap().text().await.unwrap();
+    let last = c
+        .get(h.url(&format!("/mint/chain?n={SIZE}")))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     let mut req = DownloadRequest::new(last, dir.path());
     req.filename = Some("movie.mkv".into());
     req.max_conns = Some(4);
     req.completed = partial;
-    let o = download(req, settings(dir.path()), MemSink::new(), CancellationToken::new(), None)
-        .await
-        .unwrap();
+    let o = download(
+        req,
+        settings(dir.path()),
+        MemSink::new(),
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert_content(&o.path, "chain", SIZE);
     assert!(
         totals.windows(2).all(|w| w[1] >= w[0]),
         "completed bytes must only ever grow across refreshes: {totals:?}"
     );
-    assert!(o.resumed_from > 0, "the chain should have preserved real progress");
+    assert!(
+        o.resumed_from > 0,
+        "the chain should have preserved real progress"
+    );
 }
 
 /// Test 10: the local partial is damaged, so even a legitimate link must be refused.
@@ -415,7 +561,10 @@ async fn a_corrupted_partial_file_is_detected_rather_than_resumed_over() {
     .unwrap();
 
     assert!(
-        matches!(report.verdict, Verdict::Reject(RejectReason::ContentMismatch { .. })),
+        matches!(
+            report.verdict,
+            Verdict::Reject(RejectReason::ContentMismatch { .. })
+        ),
         "damaged local data must not be resumed over: {:?}",
         report.verdict
     );
@@ -423,7 +572,10 @@ async fn a_corrupted_partial_file_is_detected_rather_than_resumed_over() {
     // And the message must not blame the link, because we cannot tell which side is wrong.
     if let Verdict::Reject(r) = &report.verdict {
         let m = r.user_message();
-        assert!(m.contains("damaged"), "must admit the local file could be at fault: {m}");
+        assert!(
+            m.contains("damaged"),
+            "must admit the local file could be at fault: {m}"
+        );
     }
 }
 
@@ -451,7 +603,10 @@ async fn validation_cost_is_negligible_against_the_file_size() {
 
     let spent = h.stats().bytes_served - before;
     assert!(report.windows_checked <= WINDOW_COUNT);
-    assert!(spent <= 1024 * 1024, "validation spent {spent} bytes, over the 1 MB budget");
+    assert!(
+        spent <= 1024 * 1024,
+        "validation spent {spent} bytes, over the 1 MB budget"
+    );
     assert!(
         (spent as f64 / partial.total() as f64) < 0.05,
         "validation cost {:.2}% of what was already downloaded",

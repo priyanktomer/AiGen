@@ -152,8 +152,17 @@ pub fn initial_conns(pr: &ProbeResult, settings: &Settings, override_k: Option<u
 
     let by_size = (size / MIN_SEGMENT).max(1) as usize;
     let ceiling = override_k.unwrap_or(settings.max_conns_per_download);
-    let base = if let Some(k) = override_k { k } else if size < 32 * 1024 * 1024 { 2 } else { 4 };
-    base.min(by_size).min(ceiling).min(settings.max_total_conns).max(1)
+    let base = if let Some(k) = override_k {
+        k
+    } else if size < 32 * 1024 * 1024 {
+        2
+    } else {
+        4
+    };
+    base.min(by_size)
+        .min(ceiling)
+        .min(settings.max_total_conns)
+        .max(1)
 }
 
 /// Run a download to completion.
@@ -168,9 +177,17 @@ pub async fn download(
     let pr = probe(&req.url, &settings, &req.spec, false).await?;
 
     let filename = req.filename.clone().unwrap_or_else(|| pr.filename.clone());
-    let dest = crate::util::filename::resolve_destination(&req.dest_dir, &filename)
-        .map_err(|e| DownloadError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())))?;
-    let part = fsx::part_path(&req.dest_dir, dest.file_name().unwrap().to_string_lossy().as_ref());
+    let dest =
+        crate::util::filename::resolve_destination(&req.dest_dir, &filename).map_err(|e| {
+            DownloadError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                e.to_string(),
+            ))
+        })?;
+    let part = fsx::part_path(
+        &req.dest_dir,
+        dest.file_name().unwrap().to_string_lossy().as_ref(),
+    );
 
     if let Some(total) = pr.total_size {
         // Fail now rather than at 90%.
@@ -218,7 +235,10 @@ pub async fn download(
     });
 
     let gov_cfg = GovernorConfig {
-        max_conns: req.max_conns.unwrap_or(settings.max_conns_per_download).min(32),
+        max_conns: req
+            .max_conns
+            .unwrap_or(settings.max_conns_per_download)
+            .min(32),
         ..Default::default()
     };
     // A fixed connection count was requested explicitly, so do not adapt away from it.
@@ -283,7 +303,11 @@ pub async fn download(
     }
 
     let final_path = unique_destination(&dest, &settings);
-    fsx::finalize(&part, &final_path, settings.collision_policy == crate::config::CollisionPolicy::Overwrite)?;
+    fsx::finalize(
+        &part,
+        &final_path,
+        settings.collision_policy == crate::config::CollisionPolicy::Overwrite,
+    )?;
 
     if settings.apply_motw {
         // Best-effort: failing to mark the zone must not fail the download.
@@ -294,8 +318,12 @@ pub async fn download(
     let (retries, requests) = {
         let ws = live.workers.lock().unwrap();
         (
-            ws.iter().map(|w| w.retries.load(Ordering::Relaxed)).sum::<u64>(),
-            ws.iter().map(|w| w.requests.load(Ordering::Relaxed)).sum::<u64>(),
+            ws.iter()
+                .map(|w| w.retries.load(Ordering::Relaxed))
+                .sum::<u64>(),
+            ws.iter()
+                .map(|w| w.requests.load(Ordering::Relaxed))
+                .sum::<u64>(),
         )
     };
     // Average is transferred bytes over wall time. Bytes carried over from a previous session
@@ -386,7 +414,8 @@ async fn drive(
             exit
         });
         live.conns.fetch_add(1, Ordering::Relaxed);
-        live.peak_conns.fetch_max(live.conns.load(Ordering::Relaxed), Ordering::Relaxed);
+        live.peak_conns
+            .fetch_max(live.conns.load(Ordering::Relaxed), Ordering::Relaxed);
     };
 
     for _ in 0..k0 {
@@ -499,7 +528,10 @@ async fn drive(
             .map(|w| w.bytes.load(Ordering::Relaxed))
             .sum::<u64>();
         let prev = live.fetched.swap(fetched, Ordering::Relaxed);
-        live.meter.lock().unwrap().record(fetched.saturating_sub(prev), Instant::now());
+        live.meter
+            .lock()
+            .unwrap()
+            .record(fetched.saturating_sub(prev), Instant::now());
     }
 
     match fatal {
@@ -509,7 +541,7 @@ async fn drive(
 }
 
 /// Stand workers down without killing them mid-range: each finishes its current claim.
-fn retire_down_to(tokens: &mut Vec<CancellationToken>, live: usize, target: usize) {
+fn retire_down_to(tokens: &mut [CancellationToken], live: usize, target: usize) {
     let mut excess = live.saturating_sub(target.max(1));
     while excess > 0 {
         match tokens.iter().position(|t| !t.is_cancelled()) {
@@ -530,7 +562,12 @@ fn snapshot(live: &Live, total: Option<u64>, retries: u64) -> Progress {
         .lock()
         .unwrap()
         .iter()
-        .filter(|w| !matches!(w.state(), worker::WorkerState::Done | worker::WorkerState::Failed))
+        .filter(|w| {
+            !matches!(
+                w.state(),
+                worker::WorkerState::Done | worker::WorkerState::Failed
+            )
+        })
         .map(|w| ConnectionInfo {
             id: w.id,
             bytes: w.bytes.load(Ordering::Relaxed),
@@ -599,29 +636,50 @@ mod tests {
     #[test]
     fn small_files_and_unrangeable_servers_get_one_connection() {
         let s = Settings::default();
-        assert_eq!(initial_conns(&pr(Some(1024), RangeSupport::Supported), &s, None), 1);
-        assert_eq!(initial_conns(&pr(Some(1 << 30), RangeSupport::Unsupported), &s, None), 1);
-        assert_eq!(initial_conns(&pr(None, RangeSupport::Supported), &s, None), 1);
+        assert_eq!(
+            initial_conns(&pr(Some(1024), RangeSupport::Supported), &s, None),
+            1
+        );
+        assert_eq!(
+            initial_conns(&pr(Some(1 << 30), RangeSupport::Unsupported), &s, None),
+            1
+        );
+        assert_eq!(
+            initial_conns(&pr(None, RangeSupport::Supported), &s, None),
+            1
+        );
     }
 
     #[test]
     fn large_files_start_at_a_conservative_four() {
         let s = Settings::default();
-        assert_eq!(initial_conns(&pr(Some(1 << 30), RangeSupport::Supported), &s, None), 4);
+        assert_eq!(
+            initial_conns(&pr(Some(1 << 30), RangeSupport::Supported), &s, None),
+            4
+        );
     }
 
     #[test]
     fn medium_files_start_smaller() {
         let s = Settings::default();
-        assert_eq!(initial_conns(&pr(Some(16 << 20), RangeSupport::Supported), &s, None), 2);
+        assert_eq!(
+            initial_conns(&pr(Some(16 << 20), RangeSupport::Supported), &s, None),
+            2
+        );
     }
 
     #[test]
     fn an_explicit_request_is_respected_within_limits() {
         let s = Settings::default();
-        assert_eq!(initial_conns(&pr(Some(1 << 30), RangeSupport::Supported), &s, Some(16)), 16);
+        assert_eq!(
+            initial_conns(&pr(Some(1 << 30), RangeSupport::Supported), &s, Some(16)),
+            16
+        );
         // But never beyond what the file can be split into.
-        assert_eq!(initial_conns(&pr(Some(6 << 20), RangeSupport::Supported), &s, Some(16)), 3);
+        assert_eq!(
+            initial_conns(&pr(Some(6 << 20), RangeSupport::Supported), &s, Some(16)),
+            3
+        );
     }
 
     #[test]

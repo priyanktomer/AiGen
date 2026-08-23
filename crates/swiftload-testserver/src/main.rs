@@ -7,7 +7,10 @@ use clap::Parser;
 use std::net::SocketAddr;
 
 #[derive(Parser)]
-#[command(name = "swiftload-testserver", about = "Deterministic, adversarial HTTP server")]
+#[command(
+    name = "swiftload-testserver",
+    about = "Deterministic, adversarial HTTP server"
+)]
 struct Args {
     /// Port to bind. 0 picks an ephemeral port.
     #[arg(long, default_value_t = 8080)]
@@ -20,7 +23,9 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
+        )
         .init();
 
     let args = Args::parse();
@@ -29,17 +34,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("swiftload-testserver listening on {}", h.base_url());
     println!();
-    println!("  {}/plain/alpha/104857600            honest, range-capable", h.base_url());
-    println!("  {}/norange/alpha/104857600          Accept-Ranges: none", h.base_url());
-    println!("  {}/liar/alpha/104857600             advertises ranges, ignores them", h.base_url());
-    println!("  {}/nolen/alpha/104857600            no Content-Length", h.base_url());
-    println!("  {}/throttle/alpha/104857600?bps=2000000&per=conn", h.base_url());
-    println!("  {}/throttle/alpha/104857600?bps=20000000&per=total", h.base_url());
-    println!("  {}/rotate-etag/alpha/104857600      same bytes, new ETag each time", h.base_url());
-    println!("  {}/decoy/other/104857600            same size, different bytes", h.base_url());
-    println!("  {}/mint/alpha?n=104857600           issue a fresh signed URL", h.base_url());
-    println!("  {}/expire/alpha                     invalidate all signed URLs", h.base_url());
-    println!("  {}/stats                            connection + byte counters", h.base_url());
+    println!(
+        "  {}/plain/alpha/104857600            honest, range-capable",
+        h.base_url()
+    );
+    println!(
+        "  {}/norange/alpha/104857600          Accept-Ranges: none",
+        h.base_url()
+    );
+    println!(
+        "  {}/liar/alpha/104857600             advertises ranges, ignores them",
+        h.base_url()
+    );
+    println!(
+        "  {}/nolen/alpha/104857600            no Content-Length",
+        h.base_url()
+    );
+    println!(
+        "  {}/throttle/alpha/104857600?bps=2000000&per=conn",
+        h.base_url()
+    );
+    println!(
+        "  {}/throttle/alpha/104857600?bps=20000000&per=total",
+        h.base_url()
+    );
+    println!(
+        "  {}/rotate-etag/alpha/104857600      same bytes, new ETag each time",
+        h.base_url()
+    );
+    println!(
+        "  {}/decoy/other/104857600            same size, different bytes",
+        h.base_url()
+    );
+    println!(
+        "  {}/mint/alpha?n=104857600           issue a fresh signed URL",
+        h.base_url()
+    );
+    println!(
+        "  {}/expire/alpha                     invalidate all signed URLs",
+        h.base_url()
+    );
+    println!(
+        "  {}/stats                            connection + byte counters",
+        h.base_url()
+    );
     println!();
 
     tokio::signal::ctrl_c().await?;

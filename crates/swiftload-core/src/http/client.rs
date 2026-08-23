@@ -34,7 +34,11 @@ pub enum ClientError {
 }
 
 /// Build one client, intended for exactly one worker.
-pub fn build(settings: &Settings, spec: &RequestSpec, target: &url::Url) -> Result<reqwest::Client, ClientError> {
+pub fn build(
+    settings: &Settings,
+    spec: &RequestSpec,
+    target: &url::Url,
+) -> Result<reqwest::Client, ClientError> {
     let mut b = reqwest::Client::builder()
         // One idle connection kept alive, so consecutive claims on the same worker reuse the
         // connection instead of re-handshaking, but pools never accumulate.
@@ -50,7 +54,11 @@ pub fn build(settings: &Settings, spec: &RequestSpec, target: &url::Url) -> Resu
         // Redirects are followed manually so the downgrade and cross-origin header rules in
         // `redirect.rs` actually apply.
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent(spec.user_agent.clone().unwrap_or_else(|| settings.user_agent.clone()));
+        .user_agent(
+            spec.user_agent
+                .clone()
+                .unwrap_or_else(|| settings.user_agent.clone()),
+        );
 
     match &spec.proxy {
         Some(p) => {
@@ -123,7 +131,10 @@ mod tests {
     #[test]
     fn rejects_a_malformed_proxy_rather_than_silently_ignoring_it() {
         let s = Settings::default();
-        let spec = RequestSpec { proxy: Some("not a url".into()), ..Default::default() };
+        let spec = RequestSpec {
+            proxy: Some("not a url".into()),
+            ..Default::default()
+        };
         assert!(build(&s, &spec, &u("https://example.com/f")).is_err());
     }
 

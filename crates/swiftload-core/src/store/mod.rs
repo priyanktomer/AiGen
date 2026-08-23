@@ -65,7 +65,9 @@ impl Store {
             conn.execute_batch(SCHEMA)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn insert(&self, d: &DownloadRecord) -> Result<()> {
@@ -108,9 +110,13 @@ impl Store {
 
     pub fn get(&self, id: &str) -> Result<Option<DownloadRecord>> {
         let c = self.conn.lock().unwrap();
-        c.query_row(&format!("SELECT {COLS} FROM downloads WHERE id = ?1"), params![id], row_to_record)
-            .optional()?
-            .transpose()
+        c.query_row(
+            &format!("SELECT {COLS} FROM downloads WHERE id = ?1"),
+            params![id],
+            row_to_record,
+        )
+        .optional()?
+        .transpose()
     }
 
     pub fn list(&self, filter: Option<DownloadStatus>) -> Result<Vec<DownloadRecord>> {
@@ -120,11 +126,16 @@ impl Store {
                 format!("SELECT {COLS} FROM downloads WHERE status = ?1 ORDER BY created_at DESC"),
                 vec![s.as_str().to_string()],
             ),
-            None => (format!("SELECT {COLS} FROM downloads ORDER BY created_at DESC"), vec![]),
+            None => (
+                format!("SELECT {COLS} FROM downloads ORDER BY created_at DESC"),
+                vec![],
+            ),
         };
         let mut stmt = c.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(args), row_to_record)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().collect()
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .collect()
     }
 
     pub fn set_status(&self, id: &str, status: DownloadStatus, error: Option<&str>) -> Result<()> {
@@ -142,7 +153,10 @@ impl Store {
     /// crashed, which in turn triggers the paranoid rewind.
     pub fn mark_clean(&self, id: &str, clean: bool) -> Result<()> {
         let c = self.conn.lock().unwrap();
-        c.execute("UPDATE downloads SET clean_shutdown = ?2 WHERE id = ?1", params![id, clean as i64])?;
+        c.execute(
+            "UPDATE downloads SET clean_shutdown = ?2 WHERE id = ?1",
+            params![id, clean as i64],
+        )?;
         Ok(())
     }
 
@@ -172,7 +186,11 @@ impl Store {
     ) -> Result<()> {
         let bytes_done: i64 = {
             let c = self.conn.lock().unwrap();
-            c.query_row("SELECT bytes_done FROM downloads WHERE id = ?1", params![id], |r| r.get(0))?
+            c.query_row(
+                "SELECT bytes_done FROM downloads WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )?
         };
         {
             let c = self.conn.lock().unwrap();
@@ -202,7 +220,11 @@ impl Store {
     ) -> Result<()> {
         let c = self.conn.lock().unwrap();
         let seq: i64 = c
-            .query_row("SELECT COALESCE(MAX(seq) + 1, 0) FROM url_history WHERE download_id = ?1", params![id], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(seq) + 1, 0) FROM url_history WHERE download_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         c.execute(
             "INSERT INTO url_history (download_id, seq, url_redacted, host, source, outcome, bytes_done_at_swap, added_at)
@@ -255,7 +277,9 @@ impl Store {
              ORDER BY created_at DESC"
         ))?;
         let rows = stmt.query_map(params![hint], row_to_record)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().collect()
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .collect()
     }
 
     /// Load resume state, applying the paranoid rewind when the last shutdown was unclean.
@@ -265,7 +289,9 @@ impl Store {
     /// a megabyte per fragment is trivial insurance against a corruption class we could not
     /// otherwise detect.
     pub fn resume_state(&self, id: &str, paranoid: bool) -> Result<(RangeSet, bool)> {
-        let rec = self.get(id)?.ok_or_else(|| StoreError::NotFound(id.to_string()))?;
+        let rec = self
+            .get(id)?
+            .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
         let mut ranges = rec.completed_ranges;
         let unclean = !rec.clean_shutdown;
         if unclean && paranoid {
@@ -274,7 +300,13 @@ impl Store {
         Ok((ranges, unclean))
     }
 
-    pub fn record_host_profile(&self, host: &str, best_conns: usize, best_bps: u64, saturated: bool) -> Result<()> {
+    pub fn record_host_profile(
+        &self,
+        host: &str,
+        best_conns: usize,
+        best_bps: u64,
+        saturated: bool,
+    ) -> Result<()> {
         let c = self.conn.lock().unwrap();
         c.execute(
             "INSERT INTO host_profiles (host, best_observed_conns, best_observed_bps, saturation_detected, samples, updated_at)
@@ -360,13 +392,13 @@ fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<DownloadRecor
         total_size: r.get::<_, Option<i64>>(10)?.map(|v| v as u64),
         bytes_done: r.get::<_, i64>(11)? as u64,
         completed_ranges: ranges,
-        status: DownloadStatus::from_str(&r.get::<_, String>(13)?),
+        status: DownloadStatus::from_db(&r.get::<_, String>(13)?),
         accept_ranges: r.get(14)?,
         etag: r.get(15)?,
         last_modified: r.get(16)?,
         content_type: r.get(17)?,
         http_version: r.get(18)?,
-        validation_state: ValidationState::from_str(&r.get::<_, String>(19)?),
+        validation_state: ValidationState::from_db(&r.get::<_, String>(19)?),
         max_connections: r.get::<_, Option<i64>>(20)?.map(|v| v as usize),
         retry_count: r.get::<_, i64>(21)? as u64,
         created_at: r.get(22)?,

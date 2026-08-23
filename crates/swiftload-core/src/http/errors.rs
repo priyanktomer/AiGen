@@ -37,7 +37,10 @@ impl ErrorClass {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::TransientNetwork | Self::TransientServer | Self::RateLimited { .. } | Self::NetworkDown
+            Self::TransientNetwork
+                | Self::TransientServer
+                | Self::RateLimited { .. }
+                | Self::NetworkDown
         )
     }
 
@@ -91,7 +94,8 @@ pub fn classify_status(
 
 /// Classify a transport-level failure.
 pub fn classify_transport(err: &reqwest::Error) -> ErrorClass {
-    if err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() || err.is_decode() {
+    if err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() || err.is_decode()
+    {
         return ErrorClass::TransientNetwork;
     }
     ErrorClass::TransientNetwork
@@ -123,8 +127,16 @@ mod tests {
     fn rate_limits_back_off_and_reduce_concurrency() {
         let c = classify_status(429, Some(Duration::from_secs(5)), false);
         assert!(c.is_retryable());
-        assert!(c.should_reduce_concurrency(), "429 must reduce, never increase, concurrency");
-        assert_eq!(c, ErrorClass::RateLimited { retry_after: Some(Duration::from_secs(5)) });
+        assert!(
+            c.should_reduce_concurrency(),
+            "429 must reduce, never increase, concurrency"
+        );
+        assert_eq!(
+            c,
+            ErrorClass::RateLimited {
+                retry_after: Some(Duration::from_secs(5))
+            }
+        );
 
         assert!(classify_status(503, None, false).should_reduce_concurrency());
     }
@@ -157,7 +169,10 @@ mod tests {
         // The file shrank or was replaced; resuming into it would corrupt the result.
         let c = classify_status(416, None, true);
         assert_eq!(c, ErrorClass::ResourceChanged);
-        assert!(!c.preserves_partial(), "stale partial must not be silently reused");
+        assert!(
+            !c.preserves_partial(),
+            "stale partial must not be silently reused"
+        );
     }
 
     #[test]
@@ -175,7 +190,7 @@ mod tests {
 
     #[test]
     fn disk_full_is_locally_fatal_not_a_retry_loop() {
-        let e = std::io::Error::new(std::io::ErrorKind::Other, "No space left on device");
+        let e = std::io::Error::other("No space left on device");
         assert_eq!(classify_io(&e), ErrorClass::LocalFatal);
         assert!(!classify_io(&e).is_retryable());
 

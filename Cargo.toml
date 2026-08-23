@@ -4,6 +4,7 @@ members = [
     "crates/swiftload-core",
     "crates/swiftload-testserver",
     "crates/swiftload-cli",
+    "crates/swiftload-bench",
 ]
 
 [workspace.package]
