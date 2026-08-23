@@ -1,10 +1,10 @@
 # SwiftLoad — implementation progress
 
-**Last updated:** end of Session 1 work. Branch `claude/swiftload-plan-oxczwz`.
+**Last updated:** end of Session 2 work. Branch `claude/session-verify-continue-neeav9`.
 
 Read this first if you are resuming in a fresh session. The full architecture plan is
-[`docs/PLAN.md`](PLAN.md); this file records what is actually built, what the benchmarks
-measured, and precisely what to do next.
+[`docs/PLAN.md`](PLAN.md); this file records what is actually built, what has been measured,
+what is deliberately different from the plan, and precisely what to do next.
 
 ---
 
@@ -12,23 +12,34 @@ measured, and precisely what to do next.
 
 | | |
 |---|---|
-| Code | ~12,400 lines, 4 crates |
-| Tests | **252 passing**, 0 failing |
-| Lint | `cargo clippy --workspace --all-targets` clean, `cargo fmt --check` clean |
-| Platform | Windows is the release target; Unix arms exist in `fsx/` so CI and this container can build and test |
-| Session 1 (engine) | **Complete** — adaptive concurrency now meets its target on a warm host |
-| Session 2 (Tauri + React UI) | **Not started** |
-| Session 3 (perf/hardening) | Partially done early — benchmark harness exists and has been run |
+| Code | ~15,900 lines of Rust (4 engine crates + the shell), ~1,800 TypeScript/TSX, ~320 CSS, plus ~220 generated binding lines |
+| Tests | **281 passing**, 0 failing |
+| Lint | `cargo clippy --workspace --all-targets -D warnings` clean, `cargo fmt --check` clean |
+| UI | `tsc --noEmit` clean, production bundle builds (192 KB, 60 KB gzipped) |
+| Platform | Windows is the release target. The engine, the shell and the UI all build and run on Linux, which is how CI and this container exercise them |
+| Session 1 (engine) | **Complete and re-verified** |
+| Session 2 (app + UI) | **Functionally complete; the Windows-only half is not done** — see below |
+| Session 3 (perf/hardening) | Benchmark harness exists and has been run |
 
 Quick verification:
 
 ```bash
-cargo test --workspace          # 252 tests
-cargo clippy --workspace --all-targets
-cargo run -p swiftload-testserver -- --port 8080
-cargo run -p swiftload-cli -- get "http://127.0.0.1:8080/plain/alpha/33554432" --out /tmp/dl
-cargo run --release -p swiftload-bench -- --reps 3 --size 67108864
+cargo test --workspace          # 281 tests
+cargo clippy --workspace --all-targets -- -D warnings
+cd app/ui && npm ci && npm run build
+cd app/src-tauri && cargo build
 ```
+
+---
+
+## Session 1 was re-verified before Session 2 began
+
+Not taken on trust from the previous session's notes:
+
+- `cargo test --workspace` — 252 passing, 0 failing, matching what was recorded.
+- `cargo clippy --workspace --all-targets` and `cargo fmt --check` — both clean.
+- A real end-to-end download through the built binary against the test server: 32 MB,
+  byte-exact, 12.5 MB/s.
 
 ---
 
@@ -36,49 +47,85 @@ cargo run --release -p swiftload-bench -- --reps 3 --size 67108864
 
 ```
 crates/
-├─ swiftload-core/          the engine — no UI dependencies
+├─ swiftload-core/          the engine — no UI dependencies (CI-enforced)
 │  ├─ util/                 RangeSet, filename sanitizer, URL redaction, speed meter, backoff
 │  ├─ http/                 per-worker clients, h2 windows, manual redirects, error classes
 │  ├─ fsx/                  positional writes, preallocation, sparse files, Mark-of-the-Web
-│  ├─ store/                SQLite (WAL), checkpoints, URL history, host profiles
-│  └─ task/                 probe · plan · governor · worker · writer · identity · orchestration
+│  ├─ store/                SQLite (WAL), checkpoints, URL history, host profiles, settings
+│  ├─ task/                 probe · plan · governor · worker · writer · identity · orchestration
+│  ├─ events.rs             ★ the engine → UI contract
+│  ├─ scheduler.rs          ★ queue, N-concurrent, host budget, app-wide probe token
+│  └─ manager.rs            ★ the application API the shell drives
 ├─ swiftload-testserver/    deterministic + adversarial HTTP server
 ├─ swiftload-cli/           headless driver (get / resume / refresh-url / list / links / …)
 └─ swiftload-bench/         benchmark matrix + report generator
+
+app/
+├─ src-tauri/               ★ Tauri v2 shell: commands, EventPump, capabilities, icons
+└─ ui/                      ★ React + TypeScript: views, dialogs, details drawer
 ```
 
 ### Behaviour that is verified by tests, not just written
 
-- **Byte-exact downloads.** Every integration test that produces a file compares it against the
-  server's deterministic content function. Right-sized-but-wrong-content is the failure mode that
-  matters, and only content checks catch it.
-- **Crash recovery.** `SIGKILL` at four different points, plus a single-connection run, each
-  followed by resume and a byte-exact result — driven through the real binary, so nothing gets a
-  chance to flush on the way out.
-- **Range liars.** A server that advertises `Accept-Ranges` then ignores `Range` is caught before
-  any byte is written, because writing a full-file body at a segment offset silently corrupts.
-- **URL refresh.** Expired signed link → fresh link → resume with progress preserved. Decoy
-  (same name, same size, different bytes) rejected on content. Size mismatch rejected without
-  spending traffic. Rotated ETag verified by content, then confirmed by the user. Corrupted local
-  partial detected rather than resumed over.
-- **Redaction.** Signed tokens cannot reach stored URL history or logs; parameter names survive.
-- **Path safety.** Property test asserts no server-supplied filename can escape the destination.
+Everything from Session 1 still holds — byte-exact downloads, `SIGKILL` crash recovery, range
+liars caught before a byte is written, URL refresh with decoys rejected, redaction, path safety.
+Session 2 adds:
 
-### Notable design decisions already implemented
+- **The queue actually throttles.** Four downloads against a limit of two never exceed two
+  concurrently, and all four still finish.
+- **Pause keeps progress**, and resume finishes byte-exact.
+- **Cancel keeps the partial; remove deletes it only when asked.** Removal of a *running*
+  download deletes after the writer has stopped, never under it.
+- **An interrupted `Active` row comes back as `Paused`**, not `Failed` — nothing went wrong with
+  it and the partial is intact.
+- **Progress is one batched event** covering every active download, and an idle app emits
+  nothing at all.
+- **Connection tables reach only subscribers**, and stop when the drawer closes.
+- **The whole §D.10 refresh flow through the manager**: expired link → fresh link → verified in
+  under a megabyte → resumed → byte-exact, with no signed token reaching the stored history.
 
-- One `reqwest::Client` **per worker**, so HTTP/2 cannot multiplex "parallel" segments onto a
-  single TCP connection. A test counts server-side accepts to prove it.
-- Single writer task per download, bounded channel, `write → fsync → checkpoint` ordering.
-- Segment state persisted as one varint-encoded BLOB in one row — atomic by construction.
-- Claim-based ranges with cooperative shrink-and-steal, not fixed N-way splits.
-- Content verification runs on **every** URL refresh, even when headers match perfectly
-  (deviation from the approved plan, recorded in `docs/PLAN.md` §D.10.3).
+### Verified by running the app, not only by testing it
+
+Under a virtual display, the built shell launches, opens its store, and drives a real 100 MB
+download from the adversarial test server through the actual IPC: the probe preview returns the
+server's true metadata, eight connections appear in the details drawer each holding a distinct
+byte range, progress and ETA update live, the completion notice fires, and the finished file is
+**byte-exact against an independent fetch of the same content**.
+
+---
+
+## A real bug found and fixed in Session 1 code
+
+One new manager test failed roughly one run in five, rejecting a URL refresh — the engine
+claiming the bytes on disk did not match a replacement link that was in fact the same file.
+
+`choose_windows` located a verification window's start inside the completed set but never
+clamped its **length** to the span it landed in. Completed bytes are not a contiguous prefix — a
+segmented download leaves gaps — and the part file is preallocated, so a window running past the
+end of a span read preallocated padding instead of short-reading. That padding was compared
+against real content from the server and reported as a content mismatch.
+
+The user-visible effect: someone with a fragmented partial download supplies a perfectly valid
+fresh link, is told it is a different file, and is refused — and a rejection deliberately has no
+"resume anyway", so they restart from zero. Exactly the outcome §D.10 exists to prevent.
+
+It survived Session 1 because the existing coverage used two wide spans and a single download
+id, a shape where a pick almost never lands within a window's length of a boundary. The
+replacement tests use a realistic fragmented layout and sweep 2,000 ids; both fail against the
+old code and pass against the fixed code, while the old test stays green either way.
+
+Fixed alongside it: a non-206 answer to a verification fetch was reported as `ContentMismatch`,
+so a server hiccup accused the link of being a different file. "Could not check" is now its own
+reject reason with its own wording.
+
+**The lesson worth carrying forward:** a flaky test was a real bug, not a timing artifact. The
+temptation to re-run it until it passed would have shipped this.
 
 ---
 
 ## What the benchmarks measured
 
-64 MB per run, 3 interleaved repetitions, local shaped server (`benchmarks/REPORT.md`):
+Unchanged from Session 1 (`benchmarks/REPORT.md`). 64 MB per run, 3 interleaved repetitions:
 
 | scenario | 1 conn | 8 | 16 | adaptive (cold) | adaptive (warm) |
 |---|---|---|---|---|---|
@@ -86,68 +133,102 @@ crates/
 | **shared total cap** — parallelism should do nothing | 1.00× | 0.98× | 0.98× | 0.98× | 0.98× |
 | **unshaped loopback** — measures overhead only | 1.00× | ~0.96× | — | ~1.0× | ~1.0× |
 
-The thesis holds in both directions: near-linear scaling where the server caps per connection,
-and **nothing at all** where the cap is shared. In the shared-cap case adaptive correctly settles
-at 8 rather than climbing to 16, and the warm run does not blow past it either — it remembered
-that the pipe, not the server, was the limit.
+The thesis holds in both directions. Warm adaptive meets the bar; the residual cold-start cost is
+intrinsic — the governor must try a level before it can know it is better.
 
-Five real bugs were found by running these benchmarks:
+---
 
-1. The governor ramped while disk-bound.
-2. A token bucket's idle burst inflated the 1-connection baseline.
-3. The report hardcoded 8 connections as "the best fixed level", flattering adaptive whenever 16 won.
-4. Measurement windows were fixed-length in time, so a download shorter than a full ramp finished
-   before any decision was made.
-5. The governor only sampled on `drive()`'s 250 ms UI tick, putting a hard floor of ~500 ms on
-   every ramp step regardless of how fast its window was ready.
+## Deliberate deviations from the plan
 
-## The adaptive-concurrency gap — resolved
+Recorded here rather than silently absorbed:
 
-**Cold start:** 0.35× → **0.55×** of the best fixed level, via three changes:
+1. **§B — `Manager` is an `Arc<Manager>` with methods, not a task behind a command mpsc.** The
+   serialisation a channel buys is already provided by two short-lived locks; the registry and
+   event fan-out it was drawn for are both present. Only the indirection — a request enum, a
+   reply channel and timeout semantics per call — is gone.
+2. **§E — the shell lives in `app/src-tauri` and is *excluded* from the cargo workspace.**
+   Building it needs the WebView system libraries, which the engine, CLI and benchmarks do not.
+   Excluding it keeps `cargo test --workspace` runnable anywhere and lets CI install those
+   libraries only for the job that needs them.
+3. **§F.6 — the Details drawer has no Timeline tab.** It would render the `events` diagnostics
+   table, which is not implemented. An empty tab is worse than no tab; it returns with the table.
+4. **`u64` crosses the IPC as TypeScript `number`, not `bigint`.** `ts-rs` defaults to `bigint`,
+   which is right for a binary channel and wrong for this one: the IPC is JSON, so `JSON.parse`
+   yields a `number` whatever the type file claims. The ceiling is 2^53 bytes — nine petabytes.
+5. **Queue priority is per-session, not persisted.** Restarting re-queues by creation time.
+   Persisting it needs a schema migration and is not worth one yet.
 
-- Measurement windows now close on **whichever comes first, time or data**
-  (`WARMUP_BYTES_PER_CONN` / `DWELL_BYTES_PER_CONN` in `task/governor.rs`). A fixed 400 ms warmup
-  is sensible on a slow link and pure waste on a fast one, where it was the dominant cost of
-  exploring.
-- Governor sampling decoupled from UI progress: 50 ms for decisions, 250 ms for the progress
-  callback (`GOVERNOR_TICK` / `PROGRESS_EVERY` in `task/mod.rs`).
-- Dwell scales to the remaining transfer.
+---
 
-**Warm start:** **1.00×** of the best fixed level — the bar is met. `HostHint` in `task/mod.rs`
-carries what a previous download from the same host settled on; `initial_conns` starts there
-instead of at four. The CLI reads it from `host_profiles` before a download and records
-`settled_conns` / `saturation_detected` afterwards, but only when the governor was actually in
-charge — a user-pinned `--conns` says nothing about what the server would allow.
+## What is left
 
-The residual cold-start cost is **intrinsic, not a defect**: the governor must try a level before
-it can know it is better, and on a one-second download the trying is most of the transfer. On a
-256 MB file cold adaptive reaches ~0.80× unaided. The report states this plainly rather than
-hiding it.
+### Session 2 items not done — all of them Windows-only
 
-## Remaining work after that
+These cannot be done or checked from this container, and none is started:
 
-1. **CI** — `.github/workflows/ci.yml`: fmt, clippy `-D warnings`, `cargo test --workspace`, and
-   the smoke benchmark as a throughput/RSS regression gate.
-2. **README** — the real numbers, including the shared-cap row where parallelism does nothing.
-   Do not publish a table that only shows wins.
-3. **Session 2** — Tauri v2 shell + React UI, per `docs/PLAN.md` §F. The engine API it needs
-   (`download`, `Progress`, `validate_replacement_url`, `Store`) is already in place and is what
-   the CLI drives today.
-4. Not yet implemented from the plan: the scheduler/queue across multiple simultaneous downloads,
-   the app-wide probe token, the `events` diagnostics table, and `INetworkListManager`
-   connectivity events.
+1. **Installer.** NSIS + MSI are configured in `tauri.conf.json` but have never been built.
+   `tauri-bundler` produces Windows installers only on Windows.
+2. **Clean-VM install test** — install, download 1 GB, pause/resume/cancel, kill and relaunch,
+   uninstall leaving no orphans. This is the §F Session 2 exit criterion and it is unmet.
+3. **Mark-of-the-Web on a real file.** The code path exists and is unit-tested; that it makes
+   SmartScreen behave has not been observed.
+4. **Idle RSS < 120 MB and CPU < 2% idle** — measured on Windows, against the real WebView2.
+
+### Session 2 items not done for other reasons
+
+5. **Security pass** (§F.10): `cargo-fuzz` over `filename.rs`, `cargo audit`, `cargo deny`. The
+   Tauri CSP and the capability allowlist *are* written and deliberately narrow — the app's file
+   and network access all goes through engine commands, and the plugin surface is limited to
+   picking a folder and handing a path to the shell.
+6. **Tray icon, notifications, autostart, categories as a user-editable setting.** The Settings
+   view covers the engine's own settings; app-level preferences (theme override, notifications,
+   start-with-Windows) have no storage yet.
+
+### Still unimplemented from the plan generally
+
+- The `events` diagnostics table (and so the Timeline tab).
+- `INetworkListManager` connectivity events — Wi-Fi reconnect currently waits for a retry rather
+  than resuming in ~1 s.
+- Mid-flight rebalancing of a running download's connection ceiling. The scheduler computes a
+  fair share at admission and cannot revise it, because `task::download` takes its ceiling once.
+  When one of two downloads on a host finishes, the other keeps its half share.
+- Session 3 in full: the complete benchmark matrix, governor tuning from measured data, the 24 h
+  soak, the §K edge-case matrix, Tier 2/3 verification, redaction fuzzing.
 
 ---
 
 ## Gotchas worth knowing
 
-- **Timing-based tests are flaky under parallel load.** Two were rewritten to key off observed
-  checkpoint progress instead of wall-clock sleeps. Do not reintroduce `sleep`-then-cancel.
+- **A flaky test here has twice been a real bug.** Investigate before re-running.
+- **Timing-based tests are flaky under parallel load.** Key off observed checkpoint progress,
+  never `sleep`-then-cancel.
 - **Progress is only observable at checkpoint granularity** (8 MiB or 5 s, whichever first). A
-  test that wants to stop at a finer boundary than that will overshoot.
-- **Preallocation means file length cannot validate a checkpoint** — the part file is always full
-  size. Existence is checked before opening instead; see the phantom-checkpoint handling in
-  `task/mod.rs`.
-- **The container has an HTTPS proxy configured.** Loopback requests bypass it via `no_proxy`
-  in `http/client.rs`; tests that build their own `reqwest::Client` must call `.no_proxy()`.
-- Benchmarks are debug-slow; always run `swiftload-bench` with `--release`.
+  test that wants to interrupt a download *in the middle* needs a file several checkpoints long —
+  otherwise the first checkpoint it sees is also the last. `BIG` in `tests/manager.rs` exists for
+  exactly this.
+- **Shape interrupt tests with `per=total`, not `per=conn`.** Under a per-connection cap the
+  aggregate rate depends on how far the governor has ramped, so the download's duration is
+  unpredictable and the test flakes.
+- **`RangeSet::spans()` returns `(start, len)`, not `(start, end)`.** Reading it as the latter
+  underflows.
+- **Preallocation means file length cannot validate a checkpoint** — and it means a read past a
+  completed span returns padding rather than short-reading. That is what caused the bug above.
+- **The container has an HTTPS proxy configured.** Loopback bypasses it via `no_proxy` in
+  `http/client.rs`; tests building their own `reqwest::Client` must call `.no_proxy()`.
+- **Benchmarks are debug-slow**; always run `swiftload-bench` with `--release`.
+- **The TypeScript bindings are generated and checked in.** After changing any type that crosses
+  the IPC, regenerate them or CI fails:
+  ```bash
+  TS_RS_EXPORT_DIR="$PWD/app/ui/src/api/bindings" \
+    cargo test -p swiftload-core --features ts export_bindings
+  ```
+- **Building the shell on Linux needs** `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+  librsvg2-dev libxdo-dev patchelf`. CI installs these in the `desktop` job only.
+- **To run the app headlessly** (how the end-to-end check above was done):
+  ```bash
+  Xvfb :99 -screen 0 1280x820x24 &
+  cd app/ui && npx vite preview --port 1420 --strictPort &   # debug builds load devUrl
+  DISPLAY=:99 WEBKIT_DISABLE_COMPOSITING_MODE=1 app/src-tauri/target/debug/swiftload-desktop
+  ```
+  Software rendering under Xvfb leaves occasional repaint artifacts in screenshots. They are not
+  UI bugs and do not appear once the region repaints.

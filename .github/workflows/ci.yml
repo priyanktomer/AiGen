@@ -61,6 +61,68 @@ jobs:
           done
           echo "engine dependency boundary intact"
 
+  desktop:
+    name: desktop shell and UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/ui/package-lock.json
+
+      # The WebView system libraries. Only this job needs them, which is why the shell is
+      # excluded from the cargo workspace — everything else builds without them.
+      - name: WebView dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf
+
+      - name: Install UI dependencies
+        working-directory: app/ui
+        run: npm ci
+
+      # The IPC types are generated from the Rust definitions. If a field is renamed in the
+      # engine and the checked-in TypeScript is not regenerated, the UI compiles against a
+      # contract that no longer exists — so a stale binding fails the build here rather than
+      # becoming an `undefined` a user finds.
+      - name: TypeScript bindings are current
+        run: |
+          set -euo pipefail
+          rm -rf app/ui/src/api/bindings
+          TS_RS_EXPORT_DIR="$PWD/app/ui/src/api/bindings" \
+            cargo test -p swiftload-core --features ts export_bindings
+          if ! git diff --quiet --exit-code -- app/ui/src/api/bindings; then
+            echo "::error::checked-in TypeScript bindings are stale; regenerate and commit them"
+            git --no-pager diff --stat -- app/ui/src/api/bindings
+            exit 1
+          fi
+          echo "bindings match the engine"
+
+      - name: UI typecheck and build
+        working-directory: app/ui
+        run: npm run build
+
+      - name: Shell formatting
+        working-directory: app/src-tauri
+        run: cargo fmt --check
+
+      - name: Shell clippy
+        working-directory: app/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Shell builds
+        working-directory: app/src-tauri
+        run: cargo build
+
   benchmark:
     name: benchmark smoke
     runs-on: ubuntu-latest
