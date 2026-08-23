@@ -72,30 +72,21 @@ pub fn sanitize(raw: &str) -> String {
 
     // 5. Windows silently strips trailing dots and spaces, so a name we recorded would not
     //    match the name on disk — which later breaks resume, delete and overwrite detection.
-    let mut name = trim_name(&cleaned).to_string();
-
-    if name.is_empty() {
-        name = "download".to_string();
-    }
+    let trimmed = trim_name(&cleaned);
 
     // 6. Truncate, preserving the extension so the file still opens with the right app.
-    let truncated = truncate_preserving_extension(&name, MAX_STEM_UTF16);
+    let truncated = truncate_preserving_extension(trimmed, MAX_STEM_UTF16);
 
-    // 8. Trim again.
+    // 7. Trim again.
     //
     // Truncation cuts at a UTF-16 budget, and that cut can land immediately after an *interior*
-    // space or dot -- re-creating the trailing character step 5 just removed. Windows would
-    // then strip it on the way to disk and the name we recorded would not match the name that
-    // exists, which is exactly the resume/delete/overwrite breakage step 5 exists to prevent.
+    // space or dot — re-creating the trailing character step 5 just removed. Windows would then
+    // strip it on the way to disk and the name we recorded would not match the name that
+    // exists, which is exactly the breakage step 5 is there to prevent.
     //
     // Found by fuzzing; a unit test with a short name can never reach this, because it needs a
     // name long enough to truncate *and* a space near the cut.
-    let trimmed = trim_name(&truncated);
-    let mut name = if trimmed.is_empty() {
-        "download".to_string()
-    } else {
-        trimmed.to_string()
-    };
+    let mut name = or_fallback(trim_name(&truncated));
 
     // 8. Reserved device names, case-insensitively, ignoring any extension.
     //
@@ -110,13 +101,10 @@ pub fn sanitize(raw: &str) -> String {
         // limit would push it one unit over, and sanitizing the result would then truncate it
         // again -- a different answer on the second pass, which is exactly the instability
         // that let the device-name hole above go unnoticed.
-        let shortened =
-            trim_name(&truncate_preserving_extension(&name, MAX_STEM_UTF16 - 1)).to_string();
-        name = if shortened.is_empty() {
-            "download".to_string()
-        } else {
-            shortened
-        };
+        name = or_fallback(trim_name(&truncate_preserving_extension(
+            &name,
+            MAX_STEM_UTF16 - 1,
+        )));
         // A stem starting with '_' can never be a device name, so one pass is enough.
         name.insert(0, '_');
     }
@@ -171,6 +159,15 @@ fn truncate_preserving_extension(name: &str, max: usize) -> String {
             format!("{}.{}", truncate_by_utf16(stem, budget), ext)
         }
         _ => truncate_by_utf16(name, max),
+    }
+}
+
+/// A name, or the fallback when trimming has left nothing.
+fn or_fallback(name: &str) -> String {
+    if name.is_empty() {
+        "download".to_string()
+    } else {
+        name.to_string()
     }
 }
 

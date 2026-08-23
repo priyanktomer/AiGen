@@ -3,15 +3,21 @@
 A free, modern Windows download manager — a genuinely fast, reliable alternative to Internet
 Download Manager, whose performance claims you can reproduce rather than take on faith.
 
-> **Status: engine complete and benchmarked. No GUI yet.**
-> The download engine, an adversarial test server, a headless CLI and a benchmark harness are
-> built and tested. The Tauri desktop UI is the next phase.
+> **Status: engine and desktop app both built. Not yet tested on real Windows.**
+> The engine, an adversarial test server, a headless CLI, a benchmark harness, the Tauri
+> desktop app and a Windows installer are all built and tested. What has *not* happened is a
+> clean-Windows install: the app is cross-compiled and its Windows-only code paths are
+> compile-checked in CI, but nobody has run the installer on Windows yet. Until someone has,
+> treat it as a pre-release.
 
 ```bash
-cargo test --workspace                                    # 252 tests
+cargo test --workspace                                    # 293 tests
 cargo run -p swiftload-testserver -- --port 8080          # adversarial server
 cargo run -p swiftload-cli -- get <url> --out ./downloads
 cargo run --release -p swiftload-bench                    # reproduce the numbers below
+
+cd app/ui && npm ci && npm run build                      # the UI
+cd app/src-tauri && cargo tauri build                     # the app and its installer
 ```
 
 ---
@@ -102,6 +108,18 @@ uploads change it routinely with identical bytes. A content mismatch is refused 
 - Signed URLs are bearer credentials, so stored history and logs keep parameter *names* and
   discard every value.
 - `https → http` redirects are refused by default; credentials are stripped across origins.
+- The app's web view runs under a restrictive CSP with no remote origins, and its capability
+  allowlist is limited to what a web view genuinely cannot do for itself — pick a folder, hand a
+  path to the shell, raise a notification, show a tray icon. Every file and network operation
+  goes through the engine's own commands, which are auditable Rust.
+- `cargo deny` and `cargo audit` run on every push, over both the engine's dependency graph and
+  the app's. Two `cargo-fuzz` targets cover the filename sanitiser and the `Content-Disposition`
+  parser, and are re-run on every push.
+
+Fuzzing those two functions found four real defects, including a Windows reserved device name
+(`COM5`) reachable through a crafted `Content-Disposition` header — the escape ran before
+truncation, and truncation handed the device name back. All four are fixed, with regression
+tests that fail against the old code.
 
 SwiftLoad is an ordinary HTTP/HTTPS download manager. It does not and will not attempt to bypass
 DRM, authentication, paywalls, access controls, or rate limits — `Retry-After` is obeyed, and a
@@ -124,6 +142,9 @@ crates/swiftload-core/        engine — no UI dependencies (CI-enforced)
 crates/swiftload-testserver/  deterministic, deliberately adversarial HTTP server
 crates/swiftload-cli/         headless driver
 crates/swiftload-bench/       benchmark matrix and report generator
+crates/swiftload-core/fuzz/   fuzz targets for the filename and header parsers
+app/src-tauri/                desktop shell: commands, event pump, tray, installer config
+app/ui/                       React + TypeScript interface
 ```
 
 ## Licence
