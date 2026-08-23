@@ -7,6 +7,7 @@ pub mod config;
 pub mod events;
 pub mod fsx;
 pub mod http;
+pub mod manager;
 pub mod scheduler;
 pub mod store;
 pub mod task;

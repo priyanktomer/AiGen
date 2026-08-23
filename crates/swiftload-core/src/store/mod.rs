@@ -36,6 +36,8 @@ pub enum StoreError {
     Ranges(#[from] crate::util::intervals::DecodeError),
     #[error("no such download: {0}")]
     NotFound(String),
+    #[error("settings could not be serialised: {0}")]
+    Serde(#[from] serde_json::Error),
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
@@ -336,6 +338,30 @@ impl Store {
             },
         )
         .optional()?)
+    }
+
+    /// Load persisted settings, or `None` on a fresh database.
+    ///
+    /// A row that fails to parse is treated as absent rather than as an error: a settings file
+    /// written by a newer version must not stop the app from opening. The caller falls back to
+    /// defaults and the next save rewrites it.
+    pub fn load_settings(&self) -> Result<Option<crate::config::Settings>> {
+        let c = self.conn.lock().unwrap();
+        let json: Option<String> = c
+            .query_row("SELECT json FROM settings WHERE id = 1", [], |r| r.get(0))
+            .optional()?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    pub fn save_settings(&self, s: &crate::config::Settings) -> Result<()> {
+        let json = serde_json::to_string(s)?;
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "INSERT INTO settings (id, json) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET json = excluded.json",
+            params![json],
+        )?;
+        Ok(())
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {

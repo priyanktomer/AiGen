@@ -191,7 +191,7 @@ async fn cmd_get(
     rec.last_modified = pr.last_modified.clone();
     rec.content_type = pr.content_type.clone();
     rec.http_version = Some(pr.http_version.clone());
-    rec.accept_ranges = range_support_code(pr.range_support);
+    rec.accept_ranges = pr.range_support.to_code();
     rec.max_connections = max_conns;
     rec.final_url = pr.final_url.to_string();
     store.insert(&rec)?;
@@ -241,7 +241,7 @@ async fn cmd_refresh(
         last_modified: rec.last_modified.clone(),
         content_type: rec.content_type.clone(),
         filename: Some(rec.filename.clone()),
-        range_support: code_to_range_support(rec.accept_ranges),
+        range_support: RangeSupport::from_code(rec.accept_ranges),
     };
 
     let (ranges, _) = store.resume_state(&id, settings.paranoid_recovery)?;
@@ -320,7 +320,7 @@ async fn cmd_refresh(
             .as_deref(),
         report.new_signals.last_modified.as_deref(),
         report.new_signals.total_size,
-        range_support_code(report.new_signals.range_support),
+        report.new_signals.range_support.to_code(),
         validation,
         if yes {
             "accepted_confirmed"
@@ -575,24 +575,6 @@ fn parse_conns(s: &str) -> Result<Option<usize>> {
         v => Ok(Some(
             v.parse().context("--conns must be a number or \"auto\"")?,
         )),
-    }
-}
-
-fn range_support_code(r: RangeSupport) -> i64 {
-    match r {
-        RangeSupport::Unknown => 0,
-        RangeSupport::Supported => 1,
-        RangeSupport::Unsupported => 2,
-        RangeSupport::Lied => 3,
-    }
-}
-
-fn code_to_range_support(c: i64) -> RangeSupport {
-    match c {
-        1 => RangeSupport::Supported,
-        2 => RangeSupport::Unsupported,
-        3 => RangeSupport::Lied,
-        _ => RangeSupport::Unknown,
     }
 }
 

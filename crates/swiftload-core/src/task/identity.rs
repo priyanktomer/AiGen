@@ -88,6 +88,11 @@ pub enum RejectReason {
     BadScheme,
     /// The replacement needs credentials we do not have.
     AuthRequired,
+    /// The server answered the identity check with something other than a partial response, so
+    /// the bytes could not be compared at all. Distinct from `ContentMismatch`: "could not
+    /// check" is not "checked and different", and telling the user their link is a different
+    /// file when the server merely hiccuped sends them back to zero for no reason.
+    CouldNotVerify { status: u16 },
 }
 
 impl RejectReason {
@@ -107,6 +112,12 @@ impl RejectReason {
             Self::BadScheme => "That is not a valid download link.".to_string(),
             Self::AuthRequired => {
                 "This link needs a sign-in that SwiftLoad cannot provide.".to_string()
+            }
+            Self::CouldNotVerify { .. } => {
+                "SwiftLoad could not check this link against what you have already downloaded \
+                 — the server did not answer the check. Nothing has been changed; try again, \
+                 or use a different link."
+                    .to_string()
             }
         }
     }
@@ -222,19 +233,33 @@ pub fn choose_windows(completed: &RangeSet, download_id: &str, count: usize) -> 
         return Vec::new();
     }
     let win = WINDOW.min(total);
-    let mut picks: Vec<u64> = Vec::new();
 
-    // Logical offset -> absolute offset within the completed set.
-    let locate = |mut logical: u64| -> u64 {
+    // Map a logical offset within the completed set to a window lying *entirely* inside one
+    // completed span.
+    //
+    // The clamp is the whole point. Completed bytes are not one contiguous prefix — a
+    // segmented download leaves gaps that have never been fetched, and the part file is
+    // preallocated, so those gaps read back as padding rather than as a short read. A window
+    // that started near the end of a span and ran past it would compare that padding against
+    // real content from the server and report a content mismatch, telling the user their
+    // perfectly good replacement link is a different file. Since a rejection has deliberately
+    // no "resume anyway", that false accusation costs them the whole download.
+    let locate = |mut logical: u64| -> (u64, u64) {
         for &(s, l) in completed.spans() {
             if logical < l {
-                return s + logical;
+                // Short spans are verified in full rather than skipped.
+                let len = win.min(l);
+                return ((s + logical).min(s + l - len), len);
             }
             logical -= l;
         }
-        completed.spans().last().map_or(0, |&(s, l)| s + l - 1)
+        completed.spans().last().map_or((0, 0), |&(s, l)| {
+            let len = win.min(l);
+            (s + l - len, len)
+        })
     };
 
+    let mut picks: Vec<(u64, u64)> = Vec::new();
     picks.push(locate(0));
     if total > win {
         picks.push(locate(total - win));
@@ -250,9 +275,11 @@ pub fn choose_windows(completed: &RangeSet, download_id: &str, count: usize) -> 
         seed = Sha256::digest(seed);
     }
 
+    // Deduplicate after filling: clamping can map distinct picks onto the same window, and
+    // fewer windows is a fine outcome where duplicates would have added no evidence.
     picks.sort_unstable();
     picks.dedup();
-    picks.into_iter().map(|p| (p, win)).collect()
+    picks
 }
 
 /// Compare two byte buffers, returning the absolute offset of the first difference.
@@ -511,6 +538,52 @@ mod tests {
     }
 
     #[test]
+    fn windows_never_run_past_the_end_of_a_span_whatever_the_id() {
+        // The layout a real segmented download actually leaves behind: several spans with
+        // never-fetched gaps between them, sized so that spans are not multiples of the
+        // window. Two wide spans (as above) is too forgiving a shape — a pick almost never
+        // lands within one window's length of a boundary, so the overrun stays hidden.
+        //
+        // Sweeping ids matters as much as the layout: window placement is derived from the
+        // download id, so a single id only ever exercises one set of positions.
+        let completed = RangeSet::from_pairs([
+            (0, 983_040),
+            (3_145_728, 983_040),
+            (6_291_456, 983_040),
+            (9_437_184, 983_040),
+            (12_582_912, 983_040),
+            (15_728_640, 1_048_576),
+            (18_874_368, 1_048_576),
+            (22_020_096, 1_835_008),
+        ]);
+        for i in 0..2_000 {
+            let id = format!("download-{i}");
+            for (off, len) in choose_windows(&completed, &id, WINDOW_COUNT) {
+                assert!(len > 0, "empty window for {id}");
+                assert!(
+                    completed.contains_all(off, off + len),
+                    "window {off}..{} reaches into a gap for {id}",
+                    off + len
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_span_shorter_than_a_window_is_verified_in_full_rather_than_overrun() {
+        let completed = RangeSet::from_pairs([(0, 1024), (10 * MB, 3 * MB)]);
+        let windows = choose_windows(&completed, "short-span", WINDOW_COUNT);
+        assert!(!windows.is_empty());
+        for (off, len) in windows {
+            assert!(
+                completed.contains_all(off, off + len),
+                "window {off}..{} escaped the short span",
+                off + len
+            );
+        }
+    }
+
+    #[test]
     fn windows_cover_the_first_and_last_downloaded_bytes() {
         let completed = RangeSet::from_pairs([(0, 8 * MB)]);
         let w = choose_windows(&completed, "abc123", WINDOW_COUNT);
@@ -677,7 +750,7 @@ pub async fn validate_replacement_url(
     let mut bytes_verified = 0u64;
     let mut mismatch = None;
 
-    for (offset, len) in &windows {
+    for (windows_done, (offset, len)) in windows.iter().enumerate() {
         let (off, len) = (*offset, *len);
 
         // What we already have on disk.
@@ -703,14 +776,13 @@ pub async fn validate_replacement_url(
             // line up, and "cannot confirm" must never become "assume fine".
             Ok(r) => {
                 return Ok(ValidationReport {
-                    verdict: Verdict::Reject(RejectReason::ContentMismatch { offset: off }),
+                    verdict: Verdict::Reject(RejectReason::CouldNotVerify {
+                        status: r.status().as_u16(),
+                    }),
                     new_signals,
                     resolved_url: pr.final_url.to_string(),
-                    windows_checked: bytes_verified as usize,
-                    bytes_verified: {
-                        let _ = r;
-                        bytes_verified
-                    },
+                    windows_checked: windows_done,
+                    bytes_verified,
                 });
             }
             Err(e) => return Err(RefreshError::Client(e.to_string())),

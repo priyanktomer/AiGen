@@ -36,6 +36,30 @@ pub enum RangeSupport {
     Lied,
 }
 
+impl RangeSupport {
+    /// The integer form persisted in `downloads.accept_ranges`.
+    pub fn to_code(self) -> i64 {
+        match self {
+            RangeSupport::Unknown => 0,
+            RangeSupport::Supported => 1,
+            RangeSupport::Unsupported => 2,
+            RangeSupport::Lied => 3,
+        }
+    }
+
+    /// Unknown codes decode to `Unknown` rather than failing, for the same reason
+    /// `DownloadStatus::from_db` does: a schema from another version must not make a row
+    /// unreadable.
+    pub fn from_code(c: i64) -> Self {
+        match c {
+            1 => RangeSupport::Supported,
+            2 => RangeSupport::Unsupported,
+            3 => RangeSupport::Lied,
+            _ => RangeSupport::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProbeResult {
     /// The URL as resolved after redirects — what segment requests actually target.
