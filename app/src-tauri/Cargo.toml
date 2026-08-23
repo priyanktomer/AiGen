@@ -6,6 +6,8 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/priyanktomer/AiGen"
 description = "SwiftLoad desktop shell."
+# An application, never a crates.io library.
+publish = false
 
 [lib]
 name = "swiftload_desktop_lib"
@@ -17,9 +19,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # The engine. `ts` turns on TypeScript generation for the types crossing the IPC boundary.
 swiftload-core = { path = "../../crates/swiftload-core", features = ["ts"] }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -28,6 +31,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
 
 [profile.release]
 opt-level = 3

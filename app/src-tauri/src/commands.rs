@@ -135,6 +135,25 @@ pub async fn commit_replacement_url(
         .await
 }
 
+/// Whether SwiftLoad is registered to start with the OS.
+///
+/// Read from the real registration rather than from a setting of our own, so the toggle cannot
+/// drift out of step with what actually happens at login.
+#[tauri::command]
+pub fn autostart_enabled(app: tauri::AppHandle) -> Res<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|e| ManagerError::Io(e.to_string()))
+}
+
+#[tauri::command]
+pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Res<()> {
+    use tauri_plugin_autostart::ManagerExt;
+    let al = app.autolaunch();
+    if enabled { al.enable() } else { al.disable() }.map_err(|e| ManagerError::Io(e.to_string()))
+}
+
 #[tauri::command]
 pub async fn choose_folder(app: tauri::AppHandle) -> Option<String> {
     let (tx, rx) = tokio::sync::oneshot::channel();

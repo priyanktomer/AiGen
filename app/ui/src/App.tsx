@@ -1,6 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { bytes, kindOf } from "./api/format";
+import { notify } from "./api/notify";
+import { applyTheme, loadPrefs, savePrefs, type Prefs } from "./api/prefs";
 import { AddDownloadDialog } from "./components/AddDownloadDialog";
 import { RefreshUrlDialog } from "./components/RefreshUrlDialog";
 import { Sidebar, type CategoryKey, type View } from "./components/Sidebar";
@@ -25,6 +27,27 @@ export default function App() {
   const [category, setCategory] = useState<CategoryKey>("all");
   const [adding, setAdding] = useState(false);
   const [refreshing, setRefreshing] = useState<Row | null>(null);
+  const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
+
+  useEffect(() => {
+    applyTheme(prefs.theme);
+    savePrefs(prefs);
+  }, [prefs]);
+
+  // Raise a desktop notification for each new notice, once. Notices are keyed by kind and id,
+  // and the store already de-duplicates them, so a re-render cannot double-notify.
+  const [notified, setNotified] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    for (const n of notices) {
+      const key = `${n.kind}:${n.id}`;
+      if (notified.has(key)) continue;
+      const wanted = n.kind === "completed" ? prefs.notifyOnComplete : prefs.notifyOnProblem;
+      if (wanted) {
+        void notify(n.kind === "completed" ? "Download finished" : "SwiftLoad", noticeText(n));
+      }
+      setNotified((prev) => new Set(prev).add(key));
+    }
+  }, [notices, prefs, notified]);
 
   const filtered = useMemo(
     () => (category === "all" ? rows : rows.filter((r) => kindOf(r.filename) === category)),
@@ -86,7 +109,9 @@ export default function App() {
             )}
             {view === "queue" && <Queue rows={filtered} onChanged={refresh} />}
             {view === "completed" && <Completed rows={filtered} onChanged={refresh} />}
-            {view === "settings" && <Settings />}
+            {view === "settings" && (
+              <Settings prefs={prefs} onPrefs={setPrefs} />
+            )}
           </div>
         </main>
       </div>

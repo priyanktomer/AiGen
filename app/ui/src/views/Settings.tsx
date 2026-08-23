@@ -2,22 +2,36 @@ import { useEffect, useState } from "react";
 
 import { api, errorMessage } from "../api/commands";
 import type { UiSettings } from "../api/bindings/UiSettings";
+import type { Prefs, Theme } from "../api/prefs";
 
 /**
  * Settings, grouped by what they protect rather than by which struct they came from, and each
  * group says why it exists. A number field with no explanation is a number nobody will ever
  * touch with any confidence.
  */
-export function Settings() {
+export function Settings({
+  prefs,
+  onPrefs,
+}: {
+  prefs: Prefs;
+  onPrefs: (p: Prefs) => void;
+}) {
   const [s, setS] = useState<UiSettings | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [autostart, setAutostart] = useState<boolean | null>(null);
 
   useEffect(() => {
     void api
       .getSettings()
       .then(setS)
       .catch((e) => setError(errorMessage(e)));
+    // Read the real OS registration rather than a preference of our own, so the toggle cannot
+    // claim something the system does not actually do.
+    void api
+      .autostartEnabled()
+      .then(setAutostart)
+      .catch(() => setAutostart(null));
   }, []);
 
   if (error && !s) return <div className="empty">{error}</div>;
@@ -75,6 +89,66 @@ export function Settings() {
 
   return (
     <div style={{ maxWidth: 720 }}>
+      <div className="settings-group">
+        <h3>Appearance and interruptions</h3>
+        <p className="why">
+          These are settings for this window on this machine. They never change what a download
+          does.
+        </p>
+        <div className="field">
+          <label htmlFor="theme">Theme</label>
+          <select
+            id="theme"
+            value={prefs.theme}
+            onChange={(e) => onPrefs({ ...prefs, theme: e.target.value as Theme })}
+          >
+            <option value="system">Match the system</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={prefs.notifyOnComplete}
+            onChange={(e) => onPrefs({ ...prefs, notifyOnComplete: e.target.checked })}
+          />
+          Notify me when a download finishes
+        </label>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={prefs.notifyOnProblem}
+            onChange={(e) => onPrefs({ ...prefs, notifyOnProblem: e.target.checked })}
+          />
+          Notify me when a download needs attention
+        </label>
+        {autostart !== null && (
+          <>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={autostart}
+                onChange={async (e) => {
+                  const want = e.target.checked;
+                  try {
+                    await api.setAutostart(want);
+                    setAutostart(await api.autostartEnabled());
+                  } catch (err) {
+                    setError(errorMessage(err));
+                  }
+                }}
+              />
+              Start SwiftLoad when I sign in
+            </label>
+            <span className="hint">
+              Opens the window at sign-in and resumes nothing on its own — anything that was
+              paused stays paused until you say so.
+            </span>
+          </>
+        )}
+      </div>
+
       <div className="settings-group">
         <h3>Where files go</h3>
         <div className="field">

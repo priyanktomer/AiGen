@@ -5,6 +5,7 @@
 
 mod commands;
 mod event_pump;
+mod tray;
 
 use std::sync::Arc;
 use swiftload_core::manager::Manager;
@@ -26,17 +27,27 @@ pub fn run() {
     // the first and exits.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
-        }));
+        builder = builder
+            .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }))
+            // Start-with-Windows. Registered with no arguments and no auto-enable: whether it
+            // is on is the user's decision, made in Settings, and the plugin reads the real
+            // registry state rather than a preference we keep in parallel with it.
+            .plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                None,
+            ));
     }
 
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -48,6 +59,7 @@ pub fn run() {
 
             event_pump::spawn(app.handle().clone(), manager.clone());
             app.manage(manager);
+            tray::build(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -81,6 +93,8 @@ pub fn run() {
             commands::validate_replacement_url,
             commands::commit_replacement_url,
             commands::choose_folder,
+            commands::autostart_enabled,
+            commands::set_autostart,
             commands::reveal_in_explorer,
             commands::open_file,
         ])

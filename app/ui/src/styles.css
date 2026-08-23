@@ -36,8 +36,11 @@
   --mono: "Cascadia Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
 }
 
+/* Dark tokens, applied two ways: by the OS preference unless the user has forced light,
+ * and by an explicit choice. The duplication is deliberate — a single rule cannot express
+ * "system says dark, or the user said dark" without one of them losing to specificity. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --accent: #4b83f0;
     --accent-hover: #6b9bf5;
     --accent-soft: rgba(75, 131, 240, 0.18);
@@ -62,6 +65,32 @@
 
     --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
   }
+}
+
+:root[data-theme="dark"] {
+    --accent: #4b83f0;
+    --accent-hover: #6b9bf5;
+    --accent-soft: rgba(75, 131, 240, 0.18);
+
+    --bg: #16181d;
+    --bg-panel: #1c1f26;
+    --bg-sunken: #121419;
+    --bg-hover: rgba(255, 255, 255, 0.06);
+    --border: rgba(255, 255, 255, 0.1);
+    --border-strong: rgba(255, 255, 255, 0.18);
+
+    --text: #e8eaee;
+    --text-dim: #a2abba;
+    --text-faint: #6f7887;
+
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --ok-soft: rgba(74, 222, 128, 0.14);
+    --warn-soft: rgba(251, 191, 36, 0.14);
+    --danger-soft: rgba(248, 113, 113, 0.14);
+
+    --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
 }
 
 * { box-sizing: border-box; }

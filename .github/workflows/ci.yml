@@ -61,6 +61,73 @@ jobs:
           done
           echo "engine dependency boundary intact"
 
+  windows-target:
+    name: Windows target compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+
+      # Windows is the release target, and most of `fsx/` — positional writes, sparse files,
+      # Mark-of-the-Web, the atomic rename — only exists behind `#[cfg(windows)]`. On a Linux
+      # build that code is not compiled at all, so it can rot indefinitely without any job
+      # noticing. This is the one that notices.
+      - name: mingw toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64
+
+      - name: Clippy for Windows
+        run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+
+  supply-chain:
+    name: advisories, licences, bans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+
+      # A known vulnerability in a dependency is a security bug in SwiftLoad regardless of
+      # whose code it is: this app parses hostile input from the network all day.
+      - name: Engine and tools
+        run: |
+          cargo deny check
+          cargo audit
+
+      # The shell has its own lockfile and its own graph, scoped to the shipped target.
+      - name: Desktop shell
+        working-directory: app/src-tauri
+        run: cargo deny check
+
+  fuzz-smoke:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      # Short by design — this is a regression gate, not a fuzzing campaign. These two targets
+      # found four real bugs in `filename.rs`, including a Windows device name reachable
+      # through truncation, so a cheap re-run on every push is worth its minute.
+      - name: Filename sanitiser
+        working-directory: crates/swiftload-core
+        run: cargo +nightly fuzz run filename -- -max_total_time=60
+
+      - name: Content-Disposition parser
+        working-directory: crates/swiftload-core
+        run: cargo +nightly fuzz run content_disposition -- -max_total_time=60
+
   desktop:
     name: desktop shell and UI
     runs-on: ubuntu-latest

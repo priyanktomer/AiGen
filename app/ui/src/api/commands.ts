@@ -47,6 +47,8 @@ export const api = {
     invoke<void>("commit_replacement_url", { id, url, acceptConfirm }),
 
   chooseFolder: () => invoke<string | null>("choose_folder"),
+  autostartEnabled: () => invoke<boolean>("autostart_enabled"),
+  setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   revealInExplorer: (id: string) => invoke<void>("reveal_in_explorer", { id }),
   openFile: (id: string) => invoke<void>("open_file", { id }),
 };
