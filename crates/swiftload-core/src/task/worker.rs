@@ -43,7 +43,9 @@ pub struct WorkerMetrics {
     claim: Mutex<Option<(u64, u64)>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum WorkerState {
     Starting,
     Connecting,

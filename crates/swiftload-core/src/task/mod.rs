@@ -28,6 +28,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 /// What we already know about a host, from a previous download.
@@ -45,6 +46,44 @@ pub struct HostHint {
     pub saturated: bool,
 }
 
+/// App-wide permission to be in a concurrency ramp.
+///
+/// Only one download may ramp at a time. Without this, two downloads sharing a link each read
+/// the other's growth as their own plateau: A adds connections, B's throughput dips, B reads
+/// that as a penalty and retreats, A reads the freed bandwidth as a win and climbs further —
+/// and the two oscillate against each other indefinitely, neither ever converging on the
+/// level the link actually supports.
+///
+/// `None` on a [`DownloadRequest`] means "unshared": the download always holds the token.
+/// That is exactly right when only one download is running, and keeps the CLI unchanged.
+#[derive(Debug, Clone)]
+pub struct ProbeToken(Arc<Semaphore>);
+
+impl Default for ProbeToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProbeToken {
+    pub fn new() -> Self {
+        Self(Arc::new(Semaphore::new(1)))
+    }
+
+    /// Take the token if it is free.
+    ///
+    /// Never waits. A download that cannot ramp right now should hold at its current level and
+    /// keep transferring; queueing for a turn would trade throughput for a measurement.
+    pub(crate) fn try_take(&self) -> Option<OwnedSemaphorePermit> {
+        self.0.clone().try_acquire_owned().ok()
+    }
+
+    /// Whether someone currently holds the token.
+    pub fn is_taken(&self) -> bool {
+        self.0.available_permits() == 0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DownloadRequest {
     pub url: String,
@@ -60,6 +99,9 @@ pub struct DownloadRequest {
     pub expected_sha256: Option<String>,
     /// What a previous download from this host learned, if anything.
     pub host_hint: Option<HostHint>,
+    /// The app-wide ramp permit. `None` means this download is the only one running and may
+    /// always ramp.
+    pub probe_token: Option<ProbeToken>,
 }
 
 impl DownloadRequest {
@@ -73,6 +115,7 @@ impl DownloadRequest {
             completed: RangeSet::new(),
             expected_sha256: None,
             host_hint: None,
+            probe_token: None,
         }
     }
 }
@@ -471,6 +514,9 @@ async fn drive(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_errors = 0u64;
     let mut tick_count: u32 = 0;
+    // Held only while the governor is measuring; dropped on release, on settling, and when
+    // the download ends.
+    let mut ramp_permit: Option<OwnedSemaphorePermit> = None;
 
     loop {
         tokio::select! {
@@ -522,6 +568,23 @@ async fn drive(
                 if cancel.is_cancelled() { break; }
 
                 if adaptive {
+                    // The governor only needs the token while it is actively measuring a
+                    // level. Taking it lazily, and dropping it the moment it stops wanting it,
+                    // keeps a long Hold phase from blocking every other download's ramp for
+                    // the rest of the transfer.
+                    let has_token = match &req.probe_token {
+                        None => true,
+                        Some(t) => {
+                            if gov.wants_probe_token() {
+                                if ramp_permit.is_none() {
+                                    ramp_permit = t.try_take();
+                                }
+                            } else {
+                                ramp_permit = None;
+                            }
+                            ramp_permit.is_some()
+                        }
+                    };
                     let errors = live.errors.load(Ordering::Relaxed);
                     let sample = Sample {
                         now,
@@ -531,7 +594,7 @@ async fn drive(
                         rate_limited: None,
                         disk_backpressure: writer.is_backpressured(),
                         remaining_bytes: plan.outstanding(),
-                        probe_token: true,
+                        probe_token: has_token,
                     };
                     last_errors = errors;
 
@@ -544,7 +607,11 @@ async fn drive(
                                 spawn_worker(&mut set, &mut retire_tokens);
                             }
                         }
-                        Decision::RetireTo(k) | Decision::ReleaseToken(k) => {
+                        Decision::RetireTo(k) => {
+                            retire_down_to(&mut retire_tokens, live.conns.load(Ordering::Relaxed), k);
+                        }
+                        Decision::ReleaseToken(k) => {
+                            ramp_permit = None;
                             retire_down_to(&mut retire_tokens, live.conns.load(Ordering::Relaxed), k);
                         }
                         Decision::BackOff { conns, .. } => {

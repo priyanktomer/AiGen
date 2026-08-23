@@ -362,6 +362,8 @@ async fn run(
         completed: rec.completed_ranges.clone(),
         expected_sha256,
         host_hint,
+        // The CLI runs one download at a time, so it always holds the ramp permit.
+        probe_token: None,
     };
 
     let cancel = CancellationToken::new();

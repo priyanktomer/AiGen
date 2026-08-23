@@ -4,8 +4,10 @@
 //! CLI, the benchmark harness, and (later) the desktop shell. See `docs/PLAN.md`.
 
 pub mod config;
+pub mod events;
 pub mod fsx;
 pub mod http;
+pub mod scheduler;
 pub mod store;
 pub mod task;
 pub mod util;

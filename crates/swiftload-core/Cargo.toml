@@ -7,7 +7,14 @@ license.workspace = true
 repository.workspace = true
 description = "SwiftLoad download engine: segmented HTTP downloading with adaptive concurrency."
 
+[features]
+# TypeScript generation for the desktop shell. Off by default so the engine carries no
+# UI-adjacent dependency in the builds the CLI and benchmarks use: `ts-rs` is build tooling,
+# but the boundary is worth keeping visible.
+ts = ["dep:ts-rs"]
+
 [dependencies]
+ts-rs = { version = "10", optional = true }
 tokio.workspace = true
 reqwest.workspace = true
 bytes.workspace = true
