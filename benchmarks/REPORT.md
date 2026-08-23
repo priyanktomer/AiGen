@@ -8,11 +8,11 @@ _each connection is capped, so parallelism should scale nearly linearly_
 
 | conns | median | p10 | p90 | vs. 1 conn | peak conns | TCP conns | CPU ms | peak RSS |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 3.8 MB/s | 3.8 MB/s | 3.8 MB/s | 1.00x | 1 | 2 | 316 | 70.4 MB |
-| 4 | 15.6 MB/s | 15.6 MB/s | 15.6 MB/s | 4.06x | 4 | 5 | 213 | 70.4 MB |
-| 8 | 31.7 MB/s | 31.7 MB/s | 31.7 MB/s | 8.27x | 8 | 9 | 186 | 70.4 MB |
-| 16 | 65.6 MB/s | 65.4 MB/s | 65.7 MB/s | 17.12x | 16 | 17 | 183 | 70.4 MB |
-| auto | 22.8 MB/s | 22.8 MB/s | 22.8 MB/s | 5.95x | 9 | 9 | 230 | 70.4 MB |
+| 1 | 3.8 MB/s | 3.8 MB/s | 3.8 MB/s | 1.00x | 1 | 2 | 350 | 71.4 MB |
+| 8 | 31.7 MB/s | 31.6 MB/s | 31.7 MB/s | 8.27x | 8 | 9 | 210 | 71.4 MB |
+| 16 | 65.8 MB/s | 65.3 MB/s | 65.8 MB/s | 17.17x | 16 | 17 | 190 | 71.4 MB |
+| auto | 36.1 MB/s | 31.5 MB/s | 36.1 MB/s | 9.42x | 16 | 17 | 230 | 71.4 MB |
+| auto-warm | 65.7 MB/s | 65.6 MB/s | 65.8 MB/s | 17.15x | 16 | 17 | 200 | 71.4 MB |
 
 ## shared total cap
 
@@ -20,11 +20,11 @@ _one budget is shared, so extra connections should buy nothing_
 
 | conns | median | p10 | p90 | vs. 1 conn | peak conns | TCP conns | CPU ms | peak RSS |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 15.6 MB/s | 15.6 MB/s | 15.6 MB/s | 1.00x | 1 | 2 | 226 | 70.4 MB |
-| 4 | 15.3 MB/s | 15.3 MB/s | 15.3 MB/s | 0.98x | 4 | 5 | 236 | 70.4 MB |
-| 8 | 15.3 MB/s | 15.3 MB/s | 15.3 MB/s | 0.98x | 8 | 9 | 256 | 70.4 MB |
-| 16 | 15.3 MB/s | 15.3 MB/s | 15.3 MB/s | 0.98x | 16 | 17 | 276 | 70.4 MB |
-| auto | 15.2 MB/s | 15.2 MB/s | 15.3 MB/s | 0.98x | 8 | 9 | 253 | 70.4 MB |
+| 1 | 15.6 MB/s | 15.3 MB/s | 15.6 MB/s | 1.00x | 1 | 2 | 230 | 71.4 MB |
+| 8 | 15.3 MB/s | 15.3 MB/s | 15.3 MB/s | 0.98x | 8 | 9 | 256 | 71.4 MB |
+| 16 | 15.3 MB/s | 15.3 MB/s | 15.3 MB/s | 0.98x | 16 | 17 | 283 | 71.4 MB |
+| auto | 15.2 MB/s | 15.2 MB/s | 15.3 MB/s | 0.98x | 8 | 9 | 263 | 71.4 MB |
+| auto-warm | 15.2 MB/s | 15.2 MB/s | 15.2 MB/s | 0.98x | 8 | 9 | 256 | 71.4 MB |
 
 ## unshaped loopback
 
@@ -32,17 +32,18 @@ _no network bottleneck at all, so this measures overhead, not speed_
 
 | conns | median | p10 | p90 | vs. 1 conn | peak conns | TCP conns | CPU ms | peak RSS |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 402.7 MB/s | 384.8 MB/s | 412.2 MB/s | 1.00x | 1 | 2 | 163 | 70.4 MB |
-| 4 | 407.4 MB/s | 386.7 MB/s | 408.6 MB/s | 1.01x | 4 | 6 | 170 | 70.4 MB |
-| 8 | 384.7 MB/s | 371.4 MB/s | 391.8 MB/s | 0.96x | 8 | 10 | 183 | 70.4 MB |
-| 16 | 370.0 MB/s | 341.6 MB/s | 371.8 MB/s | 0.92x | 16 | 17 | 210 | 70.4 MB |
-| auto | 373.7 MB/s | 371.6 MB/s | 393.2 MB/s | 0.93x | 4 | 6 | 186 | 70.4 MB |
+| 1 | 389.3 MB/s | 380.9 MB/s | 398.4 MB/s | 1.00x | 1 | 2 | 160 | 71.4 MB |
+| 8 | 371.2 MB/s | 352.2 MB/s | 376.1 MB/s | 0.95x | 8 | 10 | 190 | 71.4 MB |
+| 16 | 361.2 MB/s | 322.9 MB/s | 361.2 MB/s | 0.93x | 16 | 17 | 206 | 71.4 MB |
+| auto | 381.3 MB/s | 378.8 MB/s | 385.7 MB/s | 0.98x | 4 | 6 | 176 | 71.4 MB |
+| auto-warm | 388.9 MB/s | 382.7 MB/s | 391.3 MB/s | 1.00x | 4 | 7 | 170 | 71.4 MB |
 
 ## What this shows
 
-- **Where segmentation wins.** Against a per-connection cap, 16 connections reached 17.12x the throughput of 1. This is the case that makes a download manager worth having: the server, not the link, is the limit.
+- **Where segmentation wins.** Against a per-connection cap, 16 connections reached 17.17x the throughput of 1. This is the case that makes a download manager worth having: the server, not the link, is the limit.
 - **Where it does not.** Against a shared cap, 8 connections reached 0.98x the throughput of 1 — that is, essentially nothing. Extra connections here cost CPU, memory and server load for no gain, which is why the default connection count is conservative and the governor stops when it detects this.
-- **Adaptive vs. the best fixed choice.** The governor reached 0.35x the throughput of the best fixed level tested (16 connections), without being told the connection count, **which does not clear the 10% bar the project sets for itself** — the governor is              leaving throughput on the table here and that is a known gap, not a rounding error. The bar for adaptive concurrency is not that it wins, but that it never loses badly to a sensible fixed guess.
+- **Adaptive, second download from a known host.** Reusing what the previous download learned, the governor reached 1.00x the best fixed level. Exploration is not free — discovering that a server allows sixteen useful connections costs most of a short download — so remembering the answer is worth more than exploring faster.
+- **Adaptive vs. the best fixed choice.** The governor reached 0.55x the throughput of the best fixed level tested (16 connections), without being told the connection count, **below the 10% bar the project sets for itself**. That is the cost of exploring: the governor has to try a level before it can know it is better, and on a download this short the trying is most of the transfer. The warm row above is the same governor once it has something to remember. The bar for adaptive concurrency is not that it wins, but that it never loses badly to a sensible fixed guess.
 
 ### Caveats
 

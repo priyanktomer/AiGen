@@ -27,6 +27,14 @@
 use crate::config::{GovernorConfig, MIN_SEGMENT};
 use std::time::{Duration, Instant};
 
+/// Data each connection should move before its throughput is worth believing. Covers TCP
+/// slow-start without pinning a fast link to a clock sized for a slow one.
+const WARMUP_BYTES_PER_CONN: u64 = 512 * 1024;
+/// Data each connection should move during a measurement window.
+const DWELL_BYTES_PER_CONN: u64 = 2 * 1024 * 1024;
+/// Shortest window that still yields a meaningful rate.
+const MIN_SAMPLE: Duration = Duration::from_millis(150);
+
 /// One observation, assembled by the download task.
 #[derive(Debug, Clone)]
 pub struct Sample {
@@ -108,11 +116,16 @@ pub struct Governor {
     /// Set once the warmup after a change has elapsed.
     window: Option<Window>,
     changed_at: Instant,
+    /// Cumulative bytes at the last concurrency change, so measurement windows can close on
+    /// data moved rather than only on elapsed time.
+    bytes_at_change: u64,
     /// Midpoint retry after a failed doubling, so we do not discard 6 because 8 failed.
     mid_candidate: Option<usize>,
     last_probe: Instant,
     reprobe_interval: Duration,
     consecutive_backpressure: u32,
+    /// Most recent cumulative byte total seen, so `change_to` can anchor the next window.
+    last_bytes: u64,
     /// Backpressure seen in the most recent sample. Distinct from the sustained counter:
     /// this blocks *growth* immediately, while the counter is what permanently caps.
     recent_backpressure: bool,
@@ -132,10 +145,12 @@ impl Governor {
             baseline: None,
             window: None,
             changed_at: now,
+            bytes_at_change: 0,
             mid_candidate: None,
             last_probe: now,
             reprobe_interval: reprobe,
             consecutive_backpressure: 0,
+            last_bytes: 0,
             recent_backpressure: false,
             stop_reason: StopReason::StillRamping,
             saturation_detected: false,
@@ -166,10 +181,13 @@ impl Governor {
         self.k = k;
         self.changed_at = now;
         self.window = None;
+        self.bytes_at_change = self.last_bytes;
     }
 
     /// Feed one observation and get the next action.
     pub fn observe(&mut self, s: &Sample) -> Decision {
+        self.last_bytes = s.bytes_total;
+
         // ── Pre-emptive back-off. Rate limiting outranks everything: never answer a limit
         //    with more connections, which is both abusive and slower.
         if let Some(retry_after) = s.rate_limited {
@@ -222,8 +240,19 @@ impl Governor {
     /// Accumulate a measurement window, then decide once it is complete.
     fn measure(&mut self, s: &Sample) -> Decision {
         // Discard the warmup: TCP slow-start and TLS make the first moments unrepresentative.
-        if s.now.saturating_duration_since(self.changed_at) < self.cfg.warmup {
-            return Decision::Hold;
+        //
+        // The window closes on **whichever comes first, time or data**. A fixed 400 ms warmup is
+        // reasonable on a slow link and pure waste on a fast one — and on a fast link it is the
+        // dominant cost of exploring, because three levels of ramp pay it three times while the
+        // download is already finishing. Sizing it in bytes per connection makes it self-scaling:
+        // brief when throughput is high, generous when it is low.
+        if self.window.is_none() {
+            let moved = s.bytes_total.saturating_sub(self.bytes_at_change);
+            let enough_bytes = moved >= WARMUP_BYTES_PER_CONN * self.k as u64;
+            let enough_time = s.now.saturating_duration_since(self.changed_at) >= self.cfg.warmup;
+            if !enough_bytes && !enough_time {
+                return Decision::Hold;
+            }
         }
         let w = self.window.get_or_insert(Window {
             started: s.now,
@@ -242,7 +271,11 @@ impl Governor {
         // revealed. When little transfer remains, measure faster and accept the extra noise: a
         // slightly noisy decision beats no decision.
         let dwell = self.effective_dwell(elapsed, moved, s.remaining_bytes);
-        if elapsed < dwell {
+        // Same rule for the measurement window: close it once enough data has passed to judge,
+        // without waiting out a clock that was sized for a slower link. The floor keeps the rate
+        // estimate meaningful — a sample taken over a few milliseconds is noise.
+        let enough_bytes = moved >= DWELL_BYTES_PER_CONN * self.k as u64;
+        if elapsed < MIN_SAMPLE || (elapsed < dwell && !enough_bytes) {
             return Decision::Hold;
         }
 

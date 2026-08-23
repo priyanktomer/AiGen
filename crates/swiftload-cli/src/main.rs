@@ -21,7 +21,7 @@ use swiftload_core::{
         download,
         identity::{validate_replacement_url, ResourceSignals, Verdict},
         probe::{probe, RangeSupport},
-        DownloadError, DownloadRequest,
+        DownloadError, DownloadRequest, HostHint,
     },
     util::redact,
 };
@@ -346,6 +346,13 @@ async fn run(
     let id = rec.id.clone();
     store.set_status(&id, DownloadStatus::Active, None)?;
 
+    // What a previous download from this host settled on, so we can skip re-discovering it.
+    let host = redact::host_of(&rec.current_url);
+    let host_hint = store.host_profile(&host)?.map(|p| HostHint {
+        best_conns: p.best_observed_conns,
+        saturated: p.saturation_detected,
+    });
+
     let req = DownloadRequest {
         url: rec.current_url.clone(),
         dest_dir: PathBuf::from(&rec.dest_dir),
@@ -354,6 +361,7 @@ async fn run(
         spec,
         completed: rec.completed_ranges.clone(),
         expected_sha256,
+        host_hint,
     };
 
     let cancel = CancellationToken::new();
@@ -395,6 +403,16 @@ async fn run(
         Ok(o) => {
             store.set_status(&id, DownloadStatus::Completed, None)?;
             store.mark_clean(&id, true)?;
+            // Remember what worked here. Only when the governor was actually in charge — a
+            // user-pinned connection count says nothing about what the server would allow.
+            if rec.max_connections.is_none() {
+                let _ = store.record_host_profile(
+                    &host,
+                    o.settled_conns,
+                    o.avg_bps,
+                    o.saturation_detected,
+                );
+            }
             if json {
                 println!(
                     "{}",

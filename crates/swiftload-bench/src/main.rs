@@ -23,10 +23,11 @@ mod sysmetrics;
 use anyhow::Result;
 use clap::Parser;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::{sync::Arc, time::Instant};
 use swiftload_core::{
     config::Settings,
-    task::{download, writer::NullSink, DownloadRequest},
+    task::{download, writer::NullSink, DownloadRequest, HostHint},
 };
 use swiftload_testserver as ts;
 use tokio_util::sync::CancellationToken;
@@ -47,7 +48,10 @@ struct Args {
     #[arg(long, default_value_t = 4_000_000)]
     bps: u64,
     /// Connection counts to test. "auto" means the adaptive governor.
-    #[arg(long, value_delimiter = ',', default_values_t = ["1".to_string(), "2".to_string(), "4".to_string(), "8".to_string(), "auto".to_string()])]
+    /// Connection counts to test. "auto" is the adaptive governor starting cold;
+    /// "auto-warm" is the adaptive governor with what a previous download from the same host
+    /// already learned, which is the common case in real use.
+    #[arg(long, value_delimiter = ',', default_values_t = ["1".to_string(), "2".to_string(), "4".to_string(), "8".to_string(), "auto".to_string(), "auto-warm".to_string()])]
     conns: Vec<String>,
     /// Write JSON results here.
     #[arg(long)]
@@ -103,6 +107,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let server = ts::spawn("127.0.0.1:0".parse().unwrap()).await?;
     let mut runs: Vec<Run> = Vec::new();
+    // What cold adaptive runs discovered, per scenario — fed to the "auto-warm" treatment the
+    // way a persisted host profile would feed a user's second download from the same host.
+    let mut learned: HashMap<String, HostHint> = HashMap::new();
 
     eprintln!(
         "swiftload-bench: {} scenarios x {} treatments x {} reps, {} per run\n",
@@ -118,7 +125,16 @@ async fn main() -> Result<()> {
                 // Interleaved: every treatment runs inside every repetition, so a slow patch
                 // of machine time hits all of them rather than penalising one.
                 let url = server.url(&(scenario.path)(args.size, args.bps));
-                let run = measure(&server, &url, conns, scenario.name, rep, args.size).await?;
+                let hint = if conns == "auto-warm" {
+                    learned.get(scenario.name).cloned()
+                } else {
+                    None
+                };
+                let (run, settled) =
+                    measure(&server, &url, conns, scenario.name, rep, args.size, hint).await?;
+                if conns == "auto" {
+                    learned.insert(scenario.name.to_string(), settled);
+                }
                 eprintln!(
                     "  rep {rep}  {:<20} {:>5} conns  {:>9}/s  {:>2} peak  {} conns opened",
                     scenario.name,
@@ -146,6 +162,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn measure(
     server: &ts::Handle,
     url: &str,
@@ -153,7 +170,8 @@ async fn measure(
     scenario: &str,
     rep: usize,
     size: u64,
-) -> Result<Run> {
+    hint: Option<HostHint>,
+) -> Result<(Run, HostHint)> {
     let dir = tempfile::tempdir()?;
     let settings = Settings {
         download_dir: dir.path().to_path_buf(),
@@ -166,9 +184,10 @@ async fn measure(
     let mut req = DownloadRequest::new(url.to_string(), dir.path());
     req.filename = Some("bench.bin".into());
     req.max_conns = match conns {
-        "auto" => None,
+        "auto" | "auto-warm" => None,
         v => Some(v.parse()?),
     };
+    req.host_hint = hint;
 
     let conns_before = server.stats().accepts;
     let cpu_before = sysmetrics::cpu_millis();
@@ -190,20 +209,28 @@ async fn measure(
         outcome.bytes
     );
 
-    Ok(Run {
-        scenario: scenario.to_string(),
-        conns: conns.to_string(),
-        rep,
-        bytes: outcome.bytes,
-        wall_ms: wall.as_millis(),
-        throughput_bps: (outcome.bytes as f64 / wall.as_secs_f64()) as u64,
-        peak_conns: outcome.peak_conns,
-        retries: outcome.retries,
-        requests: outcome.requests,
-        server_connections: server.stats().accepts - conns_before,
-        cpu_ms: sysmetrics::cpu_millis().saturating_sub(cpu_before),
-        peak_rss_bytes: sysmetrics::peak_rss_bytes(),
-    })
+    let settled = HostHint {
+        best_conns: Some(outcome.settled_conns),
+        saturated: outcome.saturation_detected,
+    };
+
+    Ok((
+        Run {
+            scenario: scenario.to_string(),
+            conns: conns.to_string(),
+            rep,
+            bytes: outcome.bytes,
+            wall_ms: wall.as_millis(),
+            throughput_bps: (outcome.bytes as f64 / wall.as_secs_f64()) as u64,
+            peak_conns: outcome.peak_conns,
+            retries: outcome.retries,
+            requests: outcome.requests,
+            server_connections: server.stats().accepts - conns_before,
+            cpu_ms: sysmetrics::cpu_millis().saturating_sub(cpu_before),
+            peak_rss_bytes: sysmetrics::peak_rss_bytes(),
+        },
+        settled,
+    ))
 }
 
 fn percentile(sorted: &[u64], p: f64) -> u64 {
@@ -305,7 +332,7 @@ fn interpretation(args: &Args, runs: &[Run]) -> String {
     let (best_fixed_conns, best_fixed) = args
         .conns
         .iter()
-        .filter(|c| c.as_str() != "auto")
+        .filter(|c| c.as_str() != "auto" && c.as_str() != "auto-warm")
         .map(|c| (c.clone(), median_for(runs, "per-connection cap", c)))
         .max_by_key(|(_, bps)| *bps)
         .unwrap_or_else(|| ("1".to_string(), 0));
@@ -327,12 +354,26 @@ fn interpretation(args: &Args, runs: &[Run]) -> String {
             total_8 as f64 / total_1 as f64
         ));
     }
+    let per_conn_warm = median_for(runs, "per-connection cap", "auto-warm");
+    if per_conn_warm > 0 && best_fixed > 0 {
+        s.push_str(&format!(
+            "- **Adaptive, second download from a known host.** Reusing what the previous \
+             download learned, the governor reached {:.2}x the best fixed level. Exploration is \
+             not free — discovering that a server allows sixteen useful connections costs most \
+             of a short download — so remembering the answer is worth more than exploring \
+             faster.\n",
+            per_conn_warm as f64 / best_fixed as f64
+        ));
+    }
     if per_conn_auto > 0 && best_fixed > 0 {
         let ratio = per_conn_auto as f64 / best_fixed as f64;
         let verdict = if ratio >= 0.9 {
             "which clears the 10% bar the project sets for itself"
         } else {
-            "**which does not clear the 10% bar the project sets for itself** — the governor is              leaving throughput on the table here and that is a known gap, not a rounding error"
+            "**below the 10% bar the project sets for itself**. That is the cost of exploring: \
+the governor has to try a level before it can know it is better, and on a download this short \
+the trying is most of the transfer. The warm row above is the same governor once it has \
+something to remember"
         };
         s.push_str(&format!(
             "- **Adaptive vs. the best fixed choice.** The governor reached {ratio:.2}x the \

@@ -30,6 +30,21 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// What we already know about a host, from a previous download.
+///
+/// Exploration is not free: discovering that a server allows sixteen useful connections costs
+/// most of a short download. Remembering the answer means the second download from the same
+/// host starts where the first one finished instead of rediscovering it from four.
+///
+/// Deliberately a plain value rather than a store handle, so the engine stays free of any
+/// persistence dependency — the caller looks it up and passes it in.
+#[derive(Debug, Clone, Default)]
+pub struct HostHint {
+    pub best_conns: Option<usize>,
+    /// The pipe, not the server, was the limit last time. Do not climb past what worked.
+    pub saturated: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct DownloadRequest {
     pub url: String,
@@ -43,6 +58,8 @@ pub struct DownloadRequest {
     pub completed: RangeSet,
     /// Verify the finished file against this, if the user supplied one.
     pub expected_sha256: Option<String>,
+    /// What a previous download from this host learned, if anything.
+    pub host_hint: Option<HostHint>,
 }
 
 impl DownloadRequest {
@@ -55,6 +72,7 @@ impl DownloadRequest {
             spec: RequestSpec::default(),
             completed: RangeSet::new(),
             expected_sha256: None,
+            host_hint: None,
         }
     }
 }
@@ -72,6 +90,9 @@ pub struct DownloadOutcome {
     pub requests: u64,
     pub stop_reason: StopReason,
     pub saturation_detected: bool,
+    /// Where concurrency settled. Worth persisting per host: it is what lets the next download
+    /// skip the ramp.
+    pub settled_conns: usize,
     pub resumed_from: u64,
     pub sha256: Option<String>,
 }
@@ -139,7 +160,12 @@ impl Live {
 /// Starting at 1 wastes the first seconds of every download relearning what is usually
 /// already known; starting at 16 is antisocial and often trips throttling before anything has
 /// been measured. Four is nearly always safe and nearly always helps when parallelism helps.
-pub fn initial_conns(pr: &ProbeResult, settings: &Settings, override_k: Option<usize>) -> usize {
+pub fn initial_conns(
+    pr: &ProbeResult,
+    settings: &Settings,
+    override_k: Option<usize>,
+    hint: Option<&HostHint>,
+) -> usize {
     if !pr.is_resumable() {
         return 1; // cannot segment without working ranges
     }
@@ -154,10 +180,18 @@ pub fn initial_conns(pr: &ProbeResult, settings: &Settings, override_k: Option<u
     let ceiling = override_k.unwrap_or(settings.max_conns_per_download);
     let base = if let Some(k) = override_k {
         k
-    } else if size < 32 * 1024 * 1024 {
-        2
     } else {
-        4
+        match hint {
+            // We have measured this host before. Start where it settled rather than paying the
+            // ramp again — but never above what it settled at, and never above the user's cap.
+            Some(h) => h
+                .best_conns
+                .filter(|_| size >= 32 * 1024 * 1024)
+                .map(|k| if h.saturated { k.min(4) } else { k })
+                .unwrap_or(if size < 32 * 1024 * 1024 { 2 } else { 4 }),
+            None if size < 32 * 1024 * 1024 => 2,
+            None => 4,
+        }
     };
     base.min(by_size)
         .min(ceiling)
@@ -221,7 +255,7 @@ pub async fn download(
     let plan = Arc::new(Plan::new(pr.total_size, &completed));
     let (writer, writer_join) = writer::spawn(file, completed, sink);
 
-    let k0 = initial_conns(&pr, &settings, req.max_conns);
+    let k0 = initial_conns(&pr, &settings, req.max_conns, req.host_hint.as_ref());
     plan.seed(k0);
 
     let live = Arc::new(Live {
@@ -244,7 +278,7 @@ pub async fn download(
     // A fixed connection count was requested explicitly, so do not adapt away from it.
     let adaptive = settings.adaptive_concurrency && req.max_conns.is_none();
 
-    let outcome = drive(
+    let driven = drive(
         &pr,
         &settings,
         &req,
@@ -264,7 +298,7 @@ pub async fn download(
     drop(writer);
     let _ = writer_join.await;
 
-    outcome?;
+    let summary = driven?;
 
     if cancel.is_cancelled() {
         return Err(DownloadError::Cancelled);
@@ -345,8 +379,9 @@ pub async fn download(
         peak_bps,
         retries,
         requests,
-        stop_reason: StopReason::StillRamping,
-        saturation_detected: false,
+        stop_reason: summary.stop_reason,
+        saturation_detected: summary.saturation_detected,
+        settled_conns: summary.settled_conns,
         resumed_from,
         sha256,
     })
@@ -377,7 +412,7 @@ async fn drive(
     k0: usize,
     cancel: CancellationToken,
     on_progress: Option<Box<dyn Fn(Progress) + Send + Sync>>,
-) -> Result<(), DownloadError> {
+) -> Result<GovernorSummary, DownloadError> {
     let mut gov = Governor::new(gov_cfg, k0, Instant::now());
     let mut set: tokio::task::JoinSet<WorkerExit> = tokio::task::JoinSet::new();
     let mut retire_tokens: Vec<CancellationToken> = Vec::new();
@@ -422,9 +457,20 @@ async fn drive(
         spawn_worker(&mut set, &mut retire_tokens);
     }
 
-    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    // The governor samples far more often than the UI is updated.
+    //
+    // These were one 250 ms tick, which quietly put a floor under how fast concurrency could
+    // adapt: a level needs at least two observations (one to close its warmup, one to close its
+    // measurement window), so every ramp step cost half a second no matter how quickly the
+    // underlying windows were ready. Sampling is just a few atomic loads, so it is cheap to do
+    // often; pushing progress into a WebView is not, so that stays at 4 Hz.
+    const GOVERNOR_TICK: Duration = Duration::from_millis(50);
+    const PROGRESS_EVERY: u32 = 5; // 250 ms
+
+    let mut ticker = tokio::time::interval(GOVERNOR_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_errors = 0u64;
+    let mut tick_count: u32 = 0;
 
     loop {
         tokio::select! {
@@ -466,8 +512,11 @@ async fn drive(
                 }
                 for w in live.workers.lock().unwrap().iter() { w.tick(now); }
 
-                if let Some(cb) = &on_progress {
-                    cb(snapshot(&live, pr.total_size, retries));
+                tick_count = tick_count.wrapping_add(1);
+                if tick_count % PROGRESS_EVERY == 0 {
+                    if let Some(cb) = &on_progress {
+                        cb(snapshot(&live, pr.total_size, retries));
+                    }
                 }
 
                 if cancel.is_cancelled() { break; }
@@ -534,10 +583,24 @@ async fn drive(
             .record(fetched.saturating_sub(prev), Instant::now());
     }
 
+    let summary = GovernorSummary {
+        stop_reason: gov.stop_reason,
+        saturation_detected: gov.saturation_detected,
+        settled_conns: gov.target_conns(),
+    };
+
     match fatal {
         Some(class) => Err(DownloadError::Failed(class)),
-        None => Ok(()),
+        None => Ok(summary),
     }
+}
+
+/// What the governor concluded, so the caller can persist it for next time.
+#[derive(Debug, Clone, Copy)]
+pub struct GovernorSummary {
+    pub stop_reason: StopReason,
+    pub saturation_detected: bool,
+    pub settled_conns: usize,
 }
 
 /// Stand workers down without killing them mid-range: each finishes its current claim.
@@ -637,15 +700,20 @@ mod tests {
     fn small_files_and_unrangeable_servers_get_one_connection() {
         let s = Settings::default();
         assert_eq!(
-            initial_conns(&pr(Some(1024), RangeSupport::Supported), &s, None),
+            initial_conns(&pr(Some(1024), RangeSupport::Supported), &s, None, None),
             1
         );
         assert_eq!(
-            initial_conns(&pr(Some(1 << 30), RangeSupport::Unsupported), &s, None),
+            initial_conns(
+                &pr(Some(1 << 30), RangeSupport::Unsupported),
+                &s,
+                None,
+                None
+            ),
             1
         );
         assert_eq!(
-            initial_conns(&pr(None, RangeSupport::Supported), &s, None),
+            initial_conns(&pr(None, RangeSupport::Supported), &s, None, None),
             1
         );
     }
@@ -654,7 +722,7 @@ mod tests {
     fn large_files_start_at_a_conservative_four() {
         let s = Settings::default();
         assert_eq!(
-            initial_conns(&pr(Some(1 << 30), RangeSupport::Supported), &s, None),
+            initial_conns(&pr(Some(1 << 30), RangeSupport::Supported), &s, None, None),
             4
         );
     }
@@ -663,7 +731,7 @@ mod tests {
     fn medium_files_start_smaller() {
         let s = Settings::default();
         assert_eq!(
-            initial_conns(&pr(Some(16 << 20), RangeSupport::Supported), &s, None),
+            initial_conns(&pr(Some(16 << 20), RangeSupport::Supported), &s, None, None),
             2
         );
     }
@@ -672,13 +740,105 @@ mod tests {
     fn an_explicit_request_is_respected_within_limits() {
         let s = Settings::default();
         assert_eq!(
-            initial_conns(&pr(Some(1 << 30), RangeSupport::Supported), &s, Some(16)),
+            initial_conns(
+                &pr(Some(1 << 30), RangeSupport::Supported),
+                &s,
+                Some(16),
+                None
+            ),
             16
         );
         // But never beyond what the file can be split into.
         assert_eq!(
-            initial_conns(&pr(Some(6 << 20), RangeSupport::Supported), &s, Some(16)),
+            initial_conns(
+                &pr(Some(6 << 20), RangeSupport::Supported),
+                &s,
+                Some(16),
+                None
+            ),
             3
+        );
+    }
+
+    #[test]
+    fn a_known_host_skips_the_ramp() {
+        // The point of remembering: the second download from a host starts where the first
+        // settled, instead of paying the exploration cost again from four connections.
+        let s = Settings {
+            max_conns_per_download: 16,
+            ..Default::default()
+        };
+        let hint = HostHint {
+            best_conns: Some(12),
+            saturated: false,
+        };
+        assert_eq!(
+            initial_conns(
+                &pr(Some(1 << 30), RangeSupport::Supported),
+                &s,
+                None,
+                Some(&hint)
+            ),
+            12
+        );
+    }
+
+    #[test]
+    fn a_host_known_to_be_saturated_starts_conservatively() {
+        // Last time, extra connections bought nothing. Opening a dozen again would be pure
+        // load on the server for no gain.
+        let s = Settings {
+            max_conns_per_download: 16,
+            ..Default::default()
+        };
+        let hint = HostHint {
+            best_conns: Some(12),
+            saturated: true,
+        };
+        assert!(
+            initial_conns(
+                &pr(Some(1 << 30), RangeSupport::Supported),
+                &s,
+                None,
+                Some(&hint)
+            ) <= 4
+        );
+    }
+
+    #[test]
+    fn a_hint_never_overrides_an_explicit_request_or_the_user_cap() {
+        let s = Settings {
+            max_conns_per_download: 6,
+            ..Default::default()
+        };
+        let hint = HostHint {
+            best_conns: Some(32),
+            saturated: false,
+        };
+        let big = pr(Some(1 << 30), RangeSupport::Supported);
+
+        // An explicit --conns wins outright.
+        assert_eq!(initial_conns(&big, &s, Some(2), Some(&hint)), 2);
+        // And the settings cap still binds.
+        assert_eq!(initial_conns(&big, &s, None, Some(&hint)), 6);
+    }
+
+    #[test]
+    fn a_hint_does_not_apply_to_small_files() {
+        // Handshakes still cost more than the parallelism recovers.
+        let s = Settings::default();
+        let hint = HostHint {
+            best_conns: Some(16),
+            saturated: false,
+        };
+        assert_eq!(
+            initial_conns(
+                &pr(Some(1024), RangeSupport::Supported),
+                &s,
+                None,
+                Some(&hint)
+            ),
+            1
         );
     }
 

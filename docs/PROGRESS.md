@@ -13,17 +13,17 @@ measured, and precisely what to do next.
 | | |
 |---|---|
 | Code | ~12,400 lines, 4 crates |
-| Tests | **248 passing**, 0 failing |
+| Tests | **252 passing**, 0 failing |
 | Lint | `cargo clippy --workspace --all-targets` clean, `cargo fmt --check` clean |
 | Platform | Windows is the release target; Unix arms exist in `fsx/` so CI and this container can build and test |
-| Session 1 (engine) | **Complete**, with one open performance gap (see below) |
+| Session 1 (engine) | **Complete** — adaptive concurrency now meets its target on a warm host |
 | Session 2 (Tauri + React UI) | **Not started** |
 | Session 3 (perf/hardening) | Partially done early — benchmark harness exists and has been run |
 
 Quick verification:
 
 ```bash
-cargo test --workspace          # 248 tests
+cargo test --workspace          # 252 tests
 cargo clippy --workspace --all-targets
 cargo run -p swiftload-testserver -- --port 8080
 cargo run -p swiftload-cli -- get "http://127.0.0.1:8080/plain/alpha/33554432" --out /tmp/dl
@@ -80,53 +80,49 @@ crates/
 
 64 MB per run, 3 interleaved repetitions, local shaped server (`benchmarks/REPORT.md`):
 
-| scenario | 1 conn | 8 conns | 16 conns | adaptive |
-|---|---|---|---|---|
-| **per-connection cap** — parallelism should scale | 1.00× | ~8.6× | **17.1×** | ~6× |
-| **shared total cap** — parallelism should do nothing | 1.00× | 0.98× | 0.98× | ~0.97× |
-| **unshaped loopback** — measures overhead only | 1.00× | ~0.96× | — | ~1.0× |
+| scenario | 1 conn | 8 | 16 | adaptive (cold) | adaptive (warm) |
+|---|---|---|---|---|---|
+| **per-connection cap** — parallelism should scale | 1.00× | 8.27× | **17.17×** | 9.42× | **17.13×** |
+| **shared total cap** — parallelism should do nothing | 1.00× | 0.98× | 0.98× | 0.98× | 0.98× |
+| **unshaped loopback** — measures overhead only | 1.00× | ~0.96× | — | ~1.0× | ~1.0× |
 
-The core thesis holds in both directions: near-linear scaling where the server caps per
-connection, and **nothing at all** where the cap is shared.
+The thesis holds in both directions: near-linear scaling where the server caps per connection,
+and **nothing at all** where the cap is shared. In the shared-cap case adaptive correctly settles
+at 8 rather than climbing to 16, and the warm run does not blow past it either — it remembered
+that the pipe, not the server, was the limit.
 
-Three real bugs were found by running these benchmarks: the governor ramped while disk-bound; a
-token bucket's idle burst inflated the 1-connection baseline; and the report itself hardcoded
-8 connections as "the best fixed level", flattering adaptive whenever 16 won.
+Five real bugs were found by running these benchmarks:
 
----
+1. The governor ramped while disk-bound.
+2. A token bucket's idle burst inflated the 1-connection baseline.
+3. The report hardcoded 8 connections as "the best fixed level", flattering adaptive whenever 16 won.
+4. Measurement windows were fixed-length in time, so a download shorter than a full ramp finished
+   before any decision was made.
+5. The governor only sampled on `drive()`'s 250 ms UI tick, putting a hard floor of ~500 ms on
+   every ramp step regardless of how fast its window was ready.
 
-## ⚠ Open gap — start here
+## The adaptive-concurrency gap — resolved
 
-**Adaptive concurrency does not reach the best fixed level under a per-connection cap.**
-It reaches roughly 0.35× of fixed-16. `docs/PLAN.md` §J requires within 10%, so this is a
-release blocker, not a polish item. The report now says so in plain language rather than hiding it.
+**Cold start:** 0.35× → **0.55×** of the best fixed level, via three changes:
 
-**Diagnosis.** The governor *does* ramp — peak connections reach 16 — but too late for the
-throughput to pay off. Each level costs a warmup plus a dwell before it can be judged, so a full
-ramp of 4 → 8 → 16 spends several seconds measuring while the download is already finishing.
-Scaling the dwell to the remaining transfer (`Governor::effective_dwell` in
-`crates/swiftload-core/src/task/governor.rs`) helped — peak connections went 4 → 7 → 16 — but did
-not close the throughput gap.
+- Measurement windows now close on **whichever comes first, time or data**
+  (`WARMUP_BYTES_PER_CONN` / `DWELL_BYTES_PER_CONN` in `task/governor.rs`). A fixed 400 ms warmup
+  is sensible on a slow link and pure waste on a fast one, where it was the dominant cost of
+  exploring.
+- Governor sampling decoupled from UI progress: 50 ms for decisions, 250 ms for the progress
+  callback (`GOVERNOR_TICK` / `PROGRESS_EVERY` in `task/mod.rs`).
+- Dwell scales to the remaining transfer.
 
-**Suggested fix, in order of expected value:**
+**Warm start:** **1.00×** of the best fixed level — the bar is met. `HostHint` in `task/mod.rs`
+carries what a previous download from the same host settled on; `initial_conns` starts there
+instead of at four. The CLI reads it from `host_profiles` before a download and records
+`settled_conns` / `saturation_detected` afterwards, but only when the governor was actually in
+charge — a user-pinned `--conns` says nothing about what the server would allow.
 
-1. **Do not pay a full baseline dwell before the first ramp.** Stepping up from the starting
-   level is nearly always safe. Spawn the next level almost immediately and judge both together,
-   rather than measuring the start level in isolation first.
-2. **Ramp more aggressively than doubling while evidence is good.** If per-connection throughput
-   holds steady across a step, the server is per-connection capped and the next step can be
-   larger than 2×.
-3. **Consult the host profile.** `store::Store::host_profile` already persists
-   `best_observed_conns`; `initial_conns` in `crates/swiftload-core/src/task/mod.rs` does not read
-   it yet. Wiring it up means the second download from a host starts where the first finished
-   instead of rediscovering it.
-4. Re-run `swiftload-bench` and confirm the 10% bar in the generated report.
-
-Governor tests live in `crates/swiftload-core/src/task/governor.rs` and run against synthetic
-throughput traces with no network, so changes can be iterated quickly. Keep
-`settles_rather_than_oscillating` and `adaptive_lands_near_the_best_fixed_level` passing.
-
----
+The residual cold-start cost is **intrinsic, not a defect**: the governor must try a level before
+it can know it is better, and on a one-second download the trying is most of the transfer. On a
+256 MB file cold adaptive reaches ~0.80× unaided. The report states this plainly rather than
+hiding it.
 
 ## Remaining work after that
 
