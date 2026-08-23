@@ -27,7 +27,7 @@
 //!   rather than routine.
 
 use crate::{
-    config::{RequestSpec, Settings},
+    config::{CollisionPolicy, RequestSpec, Settings},
     events::{
         ConnectionSnapshot, ConnectionsSnapshot, EngineEvent, Notice, ProgressSnapshot,
         StateChanged,
@@ -133,13 +133,17 @@ pub struct DownloadSummary {
     pub host: String,
     pub dest_dir: String,
     pub category: String,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub total_size: Option<u64>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub bytes_done: u64,
     pub status: DownloadStatus,
     pub validation_state: ValidationState,
     /// Set only while queued.
     pub queue_position: Option<usize>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub created_at: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub completed_at: Option<i64>,
     pub error: Option<String>,
     /// Whether the server supports picking up where this left off.
@@ -150,12 +154,15 @@ pub struct DownloadSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct UrlHistoryRow {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub seq: i64,
     pub url_redacted: String,
     pub host: String,
     pub source: String,
     pub outcome: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub bytes_done_at_swap: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub added_at: i64,
 }
 
@@ -172,7 +179,9 @@ pub struct DownloadDetails {
     pub http_version: Option<String>,
     pub accept_ranges: RangeSupport,
     pub max_connections: Option<usize>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub retry_count: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub url_refresh_count: i64,
     pub part_path: String,
     /// How many contiguous spans the completed bytes form. One means a clean prefix; more
@@ -190,6 +199,7 @@ pub struct ProbePreview {
     pub url_redacted: String,
     pub final_url_redacted: String,
     pub filename: String,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub total_size: Option<u64>,
     pub resumable: bool,
     pub segmentable: bool,
@@ -199,6 +209,85 @@ pub struct ProbePreview {
     /// Incomplete downloads that look like this one (§D.10.7). Weak evidence by construction —
     /// enough to offer a resume, never enough to assume one.
     pub existing: Vec<DownloadSummary>,
+}
+
+/// Settings as the Settings view wants them.
+///
+/// [`Settings`] is the engine's own type and carries `Duration`s, which serde renders as
+/// `{ "secs": 15, "nanos": 0 }` — correct, and useless to bind a number input to. This is the
+/// same settings expressed for a form, and it is the only shape the UI ever sees.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct UiSettings {
+    pub download_dir: String,
+    pub max_concurrent_downloads: usize,
+    pub max_conns_per_download: usize,
+    pub max_total_conns: usize,
+    pub max_conns_per_host: usize,
+    pub adaptive_concurrency: bool,
+    pub max_retries_per_segment: u32,
+    pub connect_timeout_secs: u64,
+    pub read_idle_timeout_secs: u64,
+    pub stall_timeout_secs: u64,
+    pub max_redirects: usize,
+    pub block_insecure_redirect: bool,
+    pub paranoid_recovery: bool,
+    pub hash_on_complete: bool,
+    pub apply_motw: bool,
+    pub collision_policy: CollisionPolicy,
+    pub user_agent: String,
+}
+
+impl From<&Settings> for UiSettings {
+    fn from(s: &Settings) -> Self {
+        Self {
+            download_dir: s.download_dir.to_string_lossy().to_string(),
+            max_concurrent_downloads: s.max_concurrent_downloads,
+            max_conns_per_download: s.max_conns_per_download,
+            max_total_conns: s.max_total_conns,
+            max_conns_per_host: s.max_conns_per_host,
+            adaptive_concurrency: s.adaptive_concurrency,
+            max_retries_per_segment: s.max_retries_per_segment,
+            connect_timeout_secs: s.connect_timeout.as_secs(),
+            read_idle_timeout_secs: s.read_idle_timeout.as_secs(),
+            stall_timeout_secs: s.stall_timeout.as_secs(),
+            max_redirects: s.max_redirects,
+            block_insecure_redirect: s.block_insecure_redirect,
+            paranoid_recovery: s.paranoid_recovery,
+            hash_on_complete: s.hash_on_complete,
+            apply_motw: s.apply_motw,
+            collision_policy: s.collision_policy,
+            user_agent: s.user_agent.clone(),
+        }
+    }
+}
+
+impl UiSettings {
+    /// Fold this form back onto engine settings.
+    ///
+    /// Every limit is floored at one. A zero here would not mean "no limit" — it would mean a
+    /// scheduler that admits nothing and an app that silently stops downloading.
+    pub fn apply_to(&self, s: &mut Settings) {
+        s.download_dir = PathBuf::from(&self.download_dir);
+        s.max_concurrent_downloads = self.max_concurrent_downloads.max(1);
+        s.max_conns_per_download = self.max_conns_per_download.max(1);
+        s.max_total_conns = self.max_total_conns.max(1);
+        s.max_conns_per_host = self.max_conns_per_host.max(1);
+        s.adaptive_concurrency = self.adaptive_concurrency;
+        s.max_retries_per_segment = self.max_retries_per_segment;
+        s.connect_timeout = Duration::from_secs(self.connect_timeout_secs.max(1));
+        s.read_idle_timeout = Duration::from_secs(self.read_idle_timeout_secs.max(1));
+        s.stall_timeout = Duration::from_secs(self.stall_timeout_secs.max(1));
+        s.max_redirects = self.max_redirects;
+        s.block_insecure_redirect = self.block_insecure_redirect;
+        s.paranoid_recovery = self.paranoid_recovery;
+        s.hash_on_complete = self.hash_on_complete;
+        s.apply_motw = self.apply_motw;
+        s.collision_policy = self.collision_policy;
+        if !self.user_agent.trim().is_empty() {
+            s.user_agent = self.user_agent.clone();
+        }
+    }
 }
 
 /// The three result cards of the refresh dialog, plus the non-resumable case.
@@ -226,9 +315,12 @@ pub struct RefreshReport {
     pub windows_checked: usize,
     /// What proving identity cost. The feature exists to avoid re-transferring data, so this
     /// number is reported rather than buried.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub bytes_verified: u64,
     /// What resuming would keep.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub preserved_bytes: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub total_size: Option<u64>,
     pub resumable: bool,
 }
@@ -330,6 +422,18 @@ impl Manager {
 
     pub fn settings(&self) -> Settings {
         self.settings.read().unwrap().clone()
+    }
+
+    pub fn ui_settings(&self) -> UiSettings {
+        UiSettings::from(&*self.settings.read().unwrap())
+    }
+
+    /// Apply a settings form. Reads the current settings, folds the form onto them, and saves,
+    /// so a field the form does not expose keeps its value rather than reverting to default.
+    pub fn set_ui_settings(&self, ui: &UiSettings) -> Result<()> {
+        let mut s = self.settings();
+        ui.apply_to(&mut s);
+        self.set_settings(s)
     }
 
     /// Persist new settings and apply the scheduling limits to future admissions.

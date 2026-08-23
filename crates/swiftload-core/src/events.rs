@@ -20,6 +20,13 @@
 //! notice is something the user must *answer* — an expired link, a full disk, a name
 //! collision. Merging them would leave the UI guessing which transitions deserve a prompt.
 //!
+//! **64-bit integers cross as TypeScript `number`, not `bigint`.** `ts-rs` defaults `u64` to
+//! `bigint`, which would be right for a binary channel and is wrong for this one: the IPC is
+//! JSON, so `JSON.parse` hands the UI a `number` whatever the type file claims. Every such
+//! field is annotated to say `number`, because a type that disagrees with the value at runtime
+//! is worse than no type at all. The cost is the usual JSON ceiling of 2^53 bytes — nine
+//! petabytes, which is not a download.
+//!
 //! **No `Duration`, no `Instant`, no `PathBuf` on the wire.** Serde renders `Duration` as a
 //! struct of seconds and nanos, which is a poor fit for TypeScript, and `Instant` cannot be
 //! serialised at all. Times cross as whole seconds and paths as strings.
@@ -39,17 +46,24 @@ use serde::{Deserialize, Serialize};
 pub struct ProgressSnapshot {
     pub id: String,
     pub status: DownloadStatus,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub bytes_done: u64,
     /// `None` when the server never told us the size. The UI must render an indeterminate bar
     /// rather than inventing a denominator.
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub total: Option<u64>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub current_bps: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub avg_bps: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub peak_bps: u64,
     /// Whole seconds remaining. `None` when there is no size, or when the current rate is zero
     /// and any estimate would be a fabrication.
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub eta_secs: Option<u64>,
     pub conns: usize,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub retries: u64,
 }
 
@@ -95,11 +109,16 @@ impl ProgressSnapshot {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ConnectionSnapshot {
     pub id: usize,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub bytes: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub bps: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub retries: u64,
     /// The half-open byte range this worker currently owns, if it holds a claim.
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub claim_start: Option<u64>,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub claim_end: Option<u64>,
     pub state: WorkerState,
 }
@@ -153,13 +172,16 @@ pub enum Notice {
     UrlExpired {
         id: String,
         filename: String,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
         bytes_done: u64,
+        #[cfg_attr(feature = "ts", ts(type = "number | null"))]
         total: Option<u64>,
     },
     /// Ran out of room. Reported with the shortfall so the UI can say how much to free.
     DiskFull {
         id: String,
         filename: String,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
         needed_bytes: u64,
     },
     /// Terminal for this attempt. Retry is still available; the partial is kept.

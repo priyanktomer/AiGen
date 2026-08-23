@@ -1,6 +1,12 @@
 /target
+app/src-tauri/target
+app/src-tauri/gen
 **/*.rs.bk
 *.slpart
 *.db
 *.db-wal
 *.db-shm
+
+# UI build products and dependencies.
+node_modules/
+app/ui/dist/

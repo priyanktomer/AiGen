@@ -25,6 +25,7 @@ use std::time::Duration;
 /// successful probe; it exists for records loaded from an older schema.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum RangeSupport {
     #[default]
     Unknown,

@@ -6,6 +6,11 @@ members = [
     "crates/swiftload-cli",
     "crates/swiftload-bench",
 ]
+# The desktop shell is its own workspace. Building it needs the WebView system libraries
+# (webkit2gtk on Linux, WebView2 on Windows), which the engine, the CLI and the benchmark
+# harness do not: keeping it out means `cargo test --workspace` stays runnable anywhere,
+# and CI installs those libraries only for the job that actually needs them.
+exclude = ["app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

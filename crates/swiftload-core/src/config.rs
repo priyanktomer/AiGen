@@ -57,6 +57,7 @@ pub struct Settings {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum CollisionPolicy {
     /// "file (2).ext", Explorer-style.
     Rename,
