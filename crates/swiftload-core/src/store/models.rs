@@ -115,6 +115,57 @@ impl UrlSource {
     }
 }
 
+/// Queue ordering. `Ord` runs Low < Normal < High, so higher priority sorts later and the
+/// queue is read in descending order.
+///
+/// Lives here rather than in the scheduler because it is persisted: a queue the user reordered
+/// should still be in that order after a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum Priority {
+    Low,
+    #[default]
+    Normal,
+    High,
+}
+
+impl Priority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
+    /// Unknown values fall back to `Normal` rather than failing, for the same reason
+    /// `DownloadStatus::from_db` does.
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "low" => Self::Low,
+            "high" => Self::High,
+            _ => Self::Normal,
+        }
+    }
+}
+
+/// One entry in a download's timeline.
+///
+/// Deliberately coarse. This is a record of decisions -- queued, started, paused, link
+/// replaced -- not a log: a per-chunk trace would be both enormous and useless to the person
+/// reading it, who wants to know what happened to their download and when.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct EventRow {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub seq: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub at: i64,
+    pub kind: String,
+    /// Free text, already redacted where it mentions a URL.
+    pub detail: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct DownloadRecord {
     pub id: String,
@@ -150,6 +201,8 @@ pub struct DownloadRecord {
     pub error_message: Option<String>,
     /// False on load means the last run did not shut down cleanly.
     pub clean_shutdown: bool,
+    /// Queue ordering, preserved across restarts.
+    pub priority: Priority,
 }
 
 impl DownloadRecord {
@@ -181,6 +234,7 @@ impl DownloadRecord {
             completed_at: None,
             error_message: None,
             clean_shutdown: false,
+            priority: Priority::Normal,
         }
     }
 

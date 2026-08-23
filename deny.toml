@@ -1,0 +1,64 @@
+# cargo-deny configuration.
+#
+# Two jobs, and they are different in kind:
+#
+#   * advisories -- a known vulnerability in a dependency is a security bug in SwiftLoad,
+#     regardless of whose code it is. A download manager parses hostile input from the network
+#     all day; this is the check that matters most.
+#   * bans -- the engine's independence from the UI is a load-bearing architectural claim
+#     (§B, and the `engine-boundary` CI job). It is asserted here a second time, at the
+#     dependency-graph level, because a claim only defended in one place eventually stops
+#     being true.
+
+[graph]
+targets = [
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "x86_64-unknown-linux-gnu" },
+]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licences only. SwiftLoad ships as a binary to end users, so a copyleft dependency
+# would carry obligations the project has not taken on.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "BSL-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"    # a workspace this size always has some; not worth churning
+# A wildcard version on a crates.io dependency means an unreviewed upgrade can arrive silently.
+# Path dependencies between our own crates are a different thing wearing the same clothes, and
+# are exempted rather than the whole check being turned off.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+# The engine must never grow a UI dependency. `swiftload-core` is driven identically by the
+# CLI, the benchmark harness and the desktop shell; if a window ever leaks into it, the engine
+# stops being independently testable and the whole test suite becomes a GUI test suite.
+[[bans.deny]]
+name = "tauri"
+wrappers = ["swiftload-desktop"]
+
+[[bans.deny]]
+name = "wry"
+wrappers = ["tauri"]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

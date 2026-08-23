@@ -35,7 +35,7 @@ use crate::{
     http::{errors::ErrorClass, headers::Validator},
     scheduler::{Limits, Priority, Scheduler},
     store::{
-        models::{DownloadRecord, DownloadStatus, UrlSource, ValidationState},
+        models::{DownloadRecord, DownloadStatus, EventRow, UrlSource, ValidationState},
         Store, StoreSink,
     },
     task::{
@@ -190,6 +190,8 @@ pub struct DownloadDetails {
     /// Live, and empty whenever the download is not running.
     pub connections: Vec<ConnectionSnapshot>,
     pub url_history: Vec<UrlHistoryRow>,
+    /// What has happened to this download, oldest first.
+    pub timeline: Vec<EventRow>,
 }
 
 /// What the Add dialog shows before committing to anything.
@@ -404,12 +406,29 @@ impl Manager {
     ///
     /// A row left `Active` means the app died mid-download. It becomes `Paused` rather than
     /// `Failed`: nothing went wrong with it, and the partial is intact and resumable.
-    fn recover(&self) -> Result<()> {
+    fn recover(self: &Arc<Self>) -> Result<()> {
         for rec in self.store.list(Some(DownloadStatus::Active))? {
             self.store
                 .set_status(&rec.id, DownloadStatus::Paused, None)?;
+            self.event(
+                &rec.id,
+                "interrupted",
+                "the app stopped while this was downloading",
+            );
         }
+        // Anything left queued is still queued. Without this the scheduler starts empty and a
+        // download the user queued before closing the app waits forever.
+        for rec in self.store.list(Some(DownloadStatus::Queued))? {
+            self.enqueue(&rec.id, &rec.current_url, rec.priority, false);
+        }
+        self.pump_queue();
         Ok(())
+    }
+
+    /// Append to a download's timeline. Best-effort: a diagnostic that fails must never take
+    /// the download down with it.
+    fn event(&self, id: &str, kind: &str, detail: &str) {
+        let _ = self.store.record_event(id, kind, detail);
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
@@ -500,6 +519,7 @@ impl Manager {
             completed_spans: rec.completed_ranges.spans().len(),
             connections,
             url_history: history,
+            timeline: self.store.events(id).unwrap_or_default(),
             summary: summarise(&rec, queue_pos),
         })
     }
@@ -517,6 +537,7 @@ impl Manager {
             "revealed",
             rec.bytes_done,
         )?;
+        self.event(id, "link_revealed", "the full link was shown to the user");
         Ok(rec.current_url)
     }
 
@@ -592,6 +613,18 @@ impl Manager {
         self.store.insert(&rec)?;
 
         let id = rec.id.clone();
+        if req.priority != Priority::Normal {
+            let _ = self.store.set_priority(&id, req.priority);
+        }
+        self.event(
+            &id,
+            "added",
+            &format!(
+                "{} from {}",
+                filename,
+                redact::host_of(pr.final_url.as_ref())
+            ),
+        );
         self.enqueue(&id, &rec.current_url, req.priority, req.start_now);
         self.emit_state(&id, DownloadStatus::Queued, None);
         self.pump_queue();
@@ -669,6 +702,7 @@ impl Manager {
     }
 
     pub fn set_priority(&self, id: &str, priority: Priority) -> bool {
+        let _ = self.store.set_priority(id, priority);
         let mut inner = self.inner.lock().unwrap();
         inner.sched.set_priority(id, priority)
     }
@@ -818,6 +852,15 @@ impl Manager {
             validation,
             source.as_str(),
         )?;
+        self.event(
+            id,
+            "link_replaced",
+            &format!(
+                "new link from {}, {} bytes kept",
+                redact::host_of(url),
+                ranges.total()
+            ),
+        );
         self.resume(id)
     }
 
@@ -910,6 +953,7 @@ impl Manager {
         let rec = self.record(id)?;
         let settings = self.settings();
         let (completed, _unclean) = self.store.resume_state(id, settings.paranoid_recovery)?;
+        let completed_total = completed.total();
 
         let host = redact::host_of(&rec.current_url);
         let host_hint = self.store.host_profile(&host)?.map(|p| HostHint {
@@ -961,6 +1005,14 @@ impl Manager {
         }
 
         self.store.set_status(id, DownloadStatus::Active, None)?;
+        self.event(
+            id,
+            "started",
+            &match completed_total {
+                0 => "starting from the beginning".to_string(),
+                n => format!("resuming from {n} bytes already on disk"),
+            },
+        );
         self.emit_state(id, DownloadStatus::Active, None);
 
         let sink = Arc::new(StoreSink {
@@ -1019,6 +1071,16 @@ impl Manager {
                     .flatten()
                     .map(|r| r.filename)
                     .unwrap_or_default();
+                self.event(
+                    id,
+                    "completed",
+                    &format!(
+                        "{} bytes in {:.1}s, settled at {} connection(s)",
+                        o.bytes,
+                        o.elapsed.as_secs_f64(),
+                        o.settled_conns
+                    ),
+                );
                 self.emit_state(id, DownloadStatus::Completed, None);
                 self.emit(EngineEvent::Notice(Notice::Completed {
                     id: id.to_string(),
@@ -1059,6 +1121,17 @@ impl Manager {
         }
 
         let msg = e.to_string();
+        self.event(
+            id,
+            match status {
+                DownloadStatus::Paused => "paused",
+                DownloadStatus::Cancelled => "cancelled",
+                DownloadStatus::NeedsAttention => "link_expired",
+                DownloadStatus::WaitingNetwork => "network_lost",
+                _ => "failed",
+            },
+            &msg,
+        );
         let _ = self.store.set_status(id, status, Some(&msg));
         // A clean stop even on failure: the partial stays exactly as recorded.
         let _ = self.store.mark_clean(id, true);

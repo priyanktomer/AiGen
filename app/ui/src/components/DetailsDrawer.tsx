@@ -5,11 +5,27 @@ import { onConnections } from "../api/events";
 import { bytes, rate, timestamp } from "../api/format";
 import type { ConnectionSnapshot } from "../api/bindings/ConnectionSnapshot";
 import type { DownloadDetails } from "../api/bindings/DownloadDetails";
+import type { EventRow } from "../api/bindings/EventRow";
 import type { ProgressSnapshot } from "../api/bindings/ProgressSnapshot";
 import { ConnectionTable } from "./ConnectionTable";
 import { Sparkline } from "./Sparkline";
 
-type Tab = "connections" | "server" | "stats" | "links";
+type Tab = "connections" | "server" | "timeline" | "stats" | "links";
+
+/// Event kinds in the words the person reading them would use.
+const EVENT_LABEL: Record<string, string> = {
+  added: "Added",
+  started: "Started",
+  paused: "Paused",
+  cancelled: "Cancelled",
+  completed: "Finished",
+  failed: "Failed",
+  interrupted: "Interrupted",
+  link_expired: "Link expired",
+  link_replaced: "Link replaced",
+  link_revealed: "Link revealed",
+  network_lost: "Network lost",
+};
 
 const RANGE_SUPPORT: Record<string, string> = {
   supported: "Yes — verified with a real ranged request",
@@ -17,6 +33,41 @@ const RANGE_SUPPORT: Record<string, string> = {
   lied: "Advertised, then ignored — segmentation disabled for safety",
   unknown: "Not established",
 };
+
+/**
+ * What has happened to this download, newest first.
+ *
+ * A record of decisions rather than a log — queued, started, paused, link replaced. Someone
+ * opening this tab is asking "what happened to my download", and a per-chunk trace answers a
+ * question nobody asked.
+ */
+function Timeline({ rows }: { rows: EventRow[] }) {
+  if (rows.length === 0) {
+    return <p className="note">Nothing has happened to this download yet.</p>;
+  }
+  // Newest first: the reason someone opens this tab is almost always the most recent thing.
+  const ordered = [...rows].reverse();
+  return (
+    <table className="data">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>What</th>
+          <th>Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        {ordered.map((e) => (
+          <tr key={e.seq}>
+            <td>{timestamp(e.at)}</td>
+            <td>{EVENT_LABEL[e.kind] ?? e.kind.replace(/_/g, " ")}</td>
+            <td style={{ whiteSpace: "normal" }}>{e.detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
 
 /**
  * Advanced detail, behind a chevron.
@@ -70,7 +121,7 @@ export function DetailsDrawer({ id, live }: { id: string; live: ProgressSnapshot
   return (
     <div className="drawer">
       <div className="tabs" role="tablist">
-        {(["connections", "server", "stats", "links"] as Tab[]).map((t) => (
+        {(["connections", "server", "timeline", "stats", "links"] as Tab[]).map((t) => (
           <button
             key={t}
             role="tab"
@@ -108,6 +159,8 @@ export function DetailsDrawer({ id, live }: { id: string; live: ProgressSnapshot
             <dd className="mono">{details.part_path}</dd>
           </dl>
         )}
+
+        {tab === "timeline" && <Timeline rows={details.timeline} />}
 
         {tab === "stats" && (
           <>

@@ -36,20 +36,9 @@
 //! (`docs/PLAN.md` §L) rather than something to fake here.
 
 use crate::task::ProbeToken;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Queue ordering. `Ord` runs Low < Normal < High, so higher priority sorts later and the
-/// queue is read in descending order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub enum Priority {
-    Low,
-    #[default]
-    Normal,
-    High,
-}
+pub use crate::store::models::Priority;
 
 /// The limits a [`Scheduler`] enforces. Mirrors the user-facing settings of the same names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -22,7 +22,9 @@ use models::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{path::Path, sync::Mutex};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+/// Timeline entries kept per download.
+const EVENT_RING: i64 = 200;
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -38,6 +40,8 @@ pub enum StoreError {
     NotFound(String),
     #[error("settings could not be serialised: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error("database schema version {0} is newer than this build understands")]
+    Schema(i64),
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
@@ -62,11 +66,29 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
 
-        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version < SCHEMA_VERSION {
+        // A fresh database is created at the current shape; an existing one is stepped forward
+        // one version at a time. `SCHEMA` alone is not enough to migrate: it is written with
+        // `CREATE TABLE IF NOT EXISTS`, so it silently does nothing to a table that already
+        // exists but is missing a column.
+        let mut version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version == 0 {
             conn.execute_batch(SCHEMA)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            version = SCHEMA_VERSION;
         }
+        // A database written by a newer build. Refuse rather than guess: its columns and
+        // invariants are unknown, and opening it read-write is how a user who downgrades once
+        // loses their download history.
+        if version > SCHEMA_VERSION {
+            return Err(StoreError::Schema(version));
+        }
+        while version < SCHEMA_VERSION {
+            match version {
+                1 => conn.execute_batch(MIGRATE_1_TO_2)?,
+                v => return Err(StoreError::Schema(v)),
+            }
+            version += 1;
+        }
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -81,15 +103,15 @@ impl Store {
                 total_size, bytes_done, completed_ranges, status,
                 accept_ranges, etag, last_modified, content_type, http_version,
                 validation_state, verified_windows,
-                max_connections, retry_count, created_at, clean_shutdown
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,0)",
+                max_connections, retry_count, created_at, clean_shutdown, priority
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,0,?25)",
             params![
                 d.id, d.original_url, d.current_url, d.final_url, d.url_refresh_count,
                 d.identity_hint, d.filename, d.dest_dir, d.part_path, d.category,
                 d.total_size, d.bytes_done, d.completed_ranges.encode(), d.status.as_str(),
                 d.accept_ranges, d.etag, d.last_modified, d.content_type, d.http_version,
                 d.validation_state.as_str(), Vec::<u8>::new(),
-                d.max_connections, d.retry_count, d.created_at,
+                d.max_connections, d.retry_count, d.created_at, d.priority.as_str(),
             ],
         )?;
         drop(c);
@@ -364,6 +386,57 @@ impl Store {
         Ok(())
     }
 
+    /// Persist queue priority, so a reordered queue survives a restart.
+    pub fn set_priority(&self, id: &str, priority: Priority) -> Result<()> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "UPDATE downloads SET priority = ?2 WHERE id = ?1",
+            params![id, priority.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Append to a download's timeline, trimming it to the most recent [`EVENT_RING`] entries.
+    ///
+    /// A ring rather than a log: this is kept for the person looking at the Timeline tab, and
+    /// an unbounded history of a download that has been retried two hundred times is neither
+    /// readable nor worth the rows.
+    pub fn record_event(&self, id: &str, kind: &str, detail: &str) -> Result<()> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "INSERT INTO events (download_id, at, kind, detail) VALUES (?1, ?2, ?3, ?4)",
+            params![id, now(), kind, detail],
+        )?;
+        c.execute(
+            "DELETE FROM events WHERE download_id = ?1 AND seq NOT IN (
+                 SELECT seq FROM events WHERE download_id = ?1 ORDER BY seq DESC LIMIT ?2
+             )",
+            params![id, EVENT_RING],
+        )?;
+        Ok(())
+    }
+
+    /// A download's timeline, oldest first — the order it is read in.
+    pub fn events(&self, id: &str) -> Result<Vec<EventRow>> {
+        let c = self.conn.lock().unwrap();
+        let mut st = c.prepare(
+            "SELECT seq, at, kind, detail FROM events WHERE download_id = ?1 ORDER BY seq ASC",
+        )?;
+        let rows = st.query_map(params![id], |r| {
+            Ok(EventRow {
+                seq: r.get(0)?,
+                at: r.get(1)?,
+                kind: r.get(2)?,
+                detail: r.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     pub fn delete(&self, id: &str) -> Result<()> {
         let c = self.conn.lock().unwrap();
         c.execute("DELETE FROM downloads WHERE id = ?1", params![id])?;
@@ -396,7 +469,7 @@ const COLS: &str = "id, original_url, current_url, final_url, url_refresh_count,
                     filename, dest_dir, part_path, category, total_size, bytes_done, \
                     completed_ranges, status, accept_ranges, etag, last_modified, content_type, \
                     http_version, validation_state, max_connections, retry_count, created_at, \
-                    completed_at, error_message, clean_shutdown";
+                    completed_at, error_message, clean_shutdown, priority";
 
 fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<DownloadRecord>> {
     let blob: Vec<u8> = r.get(12)?;
@@ -431,6 +504,7 @@ fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<DownloadRecor
         completed_at: r.get(23)?,
         error_message: r.get(24)?,
         clean_shutdown: r.get::<_, i64>(25)? != 0,
+        priority: Priority::from_db(&r.get::<_, String>(26)?),
     }))
 }
 
@@ -462,7 +536,8 @@ CREATE TABLE IF NOT EXISTS downloads (
     created_at        INTEGER NOT NULL,
     completed_at      INTEGER,
     error_message     TEXT,
-    clean_shutdown    INTEGER NOT NULL DEFAULT 0
+    clean_shutdown    INTEGER NOT NULL DEFAULT 0,
+    priority          TEXT NOT NULL DEFAULT 'normal'
 );
 CREATE INDEX IF NOT EXISTS idx_dl_status   ON downloads(status);
 CREATE INDEX IF NOT EXISTS idx_dl_created  ON downloads(created_at DESC);
@@ -493,4 +568,209 @@ CREATE TABLE IF NOT EXISTS settings (
     id   INTEGER PRIMARY KEY CHECK (id = 1),
     json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS events (
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    download_id TEXT NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
+    at          INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    detail      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_events_dl ON events(download_id, seq DESC);
 "#;
+
+/// Schema 1 -> 2: queue priority survives a restart, and downloads keep a timeline.
+const MIGRATE_1_TO_2: &str = r#"
+ALTER TABLE downloads ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal';
+
+CREATE TABLE IF NOT EXISTS events (
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    download_id TEXT NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
+    at          INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    detail      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_events_dl ON events(download_id, seq DESC);
+"#;
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    /// The schema exactly as version 1 shipped.
+    ///
+    /// Pinned here as a literal rather than referenced from `SCHEMA`, because the whole point
+    /// of a migration test is to start from the shape that is actually out in the world. A
+    /// test that migrated from the *current* schema would pass forever while testing nothing.
+    const SCHEMA_V1: &str = r#"
+CREATE TABLE downloads (
+    id                TEXT PRIMARY KEY,
+    original_url      TEXT NOT NULL,
+    current_url       TEXT NOT NULL,
+    final_url         TEXT NOT NULL,
+    url_refresh_count INTEGER NOT NULL DEFAULT 0,
+    identity_hint     TEXT NOT NULL DEFAULT '',
+    filename          TEXT NOT NULL,
+    dest_dir          TEXT NOT NULL,
+    part_path         TEXT NOT NULL,
+    category          TEXT NOT NULL DEFAULT 'other',
+    total_size        INTEGER,
+    bytes_done        INTEGER NOT NULL DEFAULT 0,
+    completed_ranges  BLOB NOT NULL DEFAULT x'',
+    status            TEXT NOT NULL,
+    accept_ranges     INTEGER NOT NULL DEFAULT 0,
+    etag              TEXT,
+    last_modified     TEXT,
+    content_type      TEXT,
+    http_version      TEXT,
+    validation_state  TEXT NOT NULL DEFAULT 'not_required',
+    verified_windows  BLOB NOT NULL DEFAULT x'',
+    max_connections   INTEGER,
+    retry_count       INTEGER NOT NULL DEFAULT 0,
+    created_at        INTEGER NOT NULL,
+    completed_at      INTEGER,
+    error_message     TEXT,
+    clean_shutdown    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE url_history (
+    download_id        TEXT NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
+    seq                INTEGER NOT NULL,
+    url_redacted       TEXT NOT NULL,
+    host               TEXT NOT NULL,
+    source             TEXT NOT NULL,
+    outcome            TEXT NOT NULL,
+    bytes_done_at_swap INTEGER NOT NULL DEFAULT 0,
+    added_at           INTEGER NOT NULL,
+    PRIMARY KEY (download_id, seq)
+);
+CREATE TABLE host_profiles (
+    host                TEXT PRIMARY KEY,
+    best_observed_conns INTEGER,
+    best_observed_bps   INTEGER,
+    saturation_detected INTEGER NOT NULL DEFAULT 0,
+    samples             INTEGER NOT NULL DEFAULT 0,
+    updated_at          INTEGER NOT NULL
+);
+CREATE TABLE settings (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    json TEXT NOT NULL
+);
+"#;
+
+    /// Build a version-1 database holding one part-finished download.
+    fn v1_database(path: &Path) {
+        let c = Connection::open(path).unwrap();
+        c.execute_batch(SCHEMA_V1).unwrap();
+        let ranges = RangeSet::from_pairs([(0, 4096)]);
+        c.execute(
+            "INSERT INTO downloads (id, original_url, current_url, final_url, identity_hint,
+                filename, dest_dir, part_path, total_size, bytes_done, completed_ranges,
+                status, created_at)
+             VALUES ('keep-me','http://a/x','http://a/x','http://a/x','hint',
+                'movie.mkv','/tmp','/tmp/movie.mkv.slpart', 999, 4096, ?1, 'paused', 42)",
+            params![ranges.encode()],
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 1i64).unwrap();
+    }
+
+    #[test]
+    fn a_version_1_database_migrates_without_losing_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.db");
+        v1_database(&path);
+
+        let store = Store::open(&path).unwrap();
+        let rec = store.get("keep-me").unwrap().expect("the row survived");
+
+        assert_eq!(rec.filename, "movie.mkv");
+        assert_eq!(rec.bytes_done, 4096);
+        assert_eq!(rec.total_size, Some(999));
+        assert_eq!(rec.completed_ranges.total(), 4096, "resume state is intact");
+        assert_eq!(rec.status, DownloadStatus::Paused);
+        assert_eq!(rec.created_at, 42);
+        assert_eq!(
+            rec.priority,
+            Priority::Normal,
+            "a column added by a migration takes its default, not a null"
+        );
+    }
+
+    #[test]
+    fn migrating_twice_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.db");
+        v1_database(&path);
+
+        drop(Store::open(&path).unwrap());
+        // Re-opening must not try to ALTER a column that now exists.
+        let store = Store::open(&path).unwrap();
+        assert!(store.get("keep-me").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_database_from_a_newer_build_is_refused_rather_than_guessed_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(SCHEMA).unwrap();
+            c.pragma_update(None, "user_version", SCHEMA_VERSION + 5)
+                .unwrap();
+        }
+        // Opening read-write with an unknown shape is how data gets lost.
+        assert!(matches!(Store::open(&path), Err(StoreError::Schema(_))));
+    }
+
+    #[test]
+    fn priority_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.db");
+        let id = {
+            let store = Store::open(&path).unwrap();
+            let rec = DownloadRecord::new("http://a/x", "f.bin", "/tmp", "/tmp/f.bin.slpart");
+            store.insert(&rec).unwrap();
+            store.set_priority(&rec.id, Priority::High).unwrap();
+            rec.id
+        };
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.get(&id).unwrap().unwrap().priority, Priority::High);
+    }
+
+    #[test]
+    fn the_event_ring_keeps_the_most_recent_entries_and_no_more() {
+        let store = Store::open_in_memory().unwrap();
+        let rec = DownloadRecord::new("http://a/x", "f.bin", "/tmp", "/tmp/f.bin.slpart");
+        store.insert(&rec).unwrap();
+
+        for i in 0..(EVENT_RING + 50) {
+            store
+                .record_event(&rec.id, "tick", &format!("entry {i}"))
+                .unwrap();
+        }
+
+        let events = store.events(&rec.id).unwrap();
+        assert_eq!(events.len(), EVENT_RING as usize, "the ring is bounded");
+        assert_eq!(
+            events.first().unwrap().detail,
+            format!("entry {}", 50),
+            "the oldest entries are the ones dropped"
+        );
+        assert_eq!(
+            events.last().unwrap().detail,
+            format!("entry {}", EVENT_RING + 49),
+            "and events read oldest-first"
+        );
+    }
+
+    #[test]
+    fn deleting_a_download_takes_its_timeline_with_it() {
+        let store = Store::open_in_memory().unwrap();
+        let rec = DownloadRecord::new("http://a/x", "f.bin", "/tmp", "/tmp/f.bin.slpart");
+        store.insert(&rec).unwrap();
+        store.record_event(&rec.id, "added", "x").unwrap();
+
+        store.delete(&rec.id).unwrap();
+        assert!(store.events(&rec.id).unwrap().is_empty());
+    }
+}

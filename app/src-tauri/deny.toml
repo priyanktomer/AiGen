@@ -1,0 +1,83 @@
+# cargo-deny configuration for the desktop shell.
+#
+# Separate from the workspace's because the shell is its own cargo workspace, and because the
+# engine-boundary bans do not apply here -- this is the crate tauri is *supposed* to be in.
+#
+# Two jobs, and they are different in kind:
+#
+#   * advisories -- a known vulnerability in a dependency is a security bug in SwiftLoad,
+#     regardless of whose code it is. A download manager parses hostile input from the network
+#     all day; this is the check that matters most.
+#   * bans -- the engine's independence from the UI is a load-bearing architectural claim
+#     (§B, and the `engine-boundary` CI job). It is asserted here a second time, at the
+#     dependency-graph level, because a claim only defended in one place eventually stops
+#     being true.
+
+[graph]
+# The shipped target only.
+#
+# Tauri pulls the GTK3 bindings on Linux, and those carry `unmaintained` RUSTSEC advisories
+# (RUSTSEC-2024-0412 and friends). They are real, and they are irrelevant to SwiftLoad: GTK is
+# not in the dependency graph on Windows, which is the only platform this ships on. The Linux
+# build exists so the app can be compiled and exercised in CI and in containers, not to be
+# released. Auditing the Linux graph would mean permanently ignoring a dozen advisories about
+# code that never reaches a user -- a list nobody would keep reading.
+#
+# If Linux ever becomes a release target, this list gains a triple and those advisories become
+# real work rather than noise.
+targets = [{ triple = "x86_64-pc-windows-msvc" }]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+# These five are `unmaintained`, not `vulnerable`: the advisory is that the repositories are
+# archived, not that a defect exists. All five are the rust-unic Unicode crates, and all reach
+# us the same way -- urlpattern -> tauri-utils -> tauri-build, which is a *build* dependency.
+# They run at compile time and are not linked into the shipped binary at all. Nothing here can
+# be upgraded without Tauri upgrading first.
+#
+# Listed individually rather than by silencing the `unmaintained` class, so that a *new*
+# unmaintained dependency still fails the build and this list stays a decision rather than a
+# blanket. Revisit whenever Tauri is upgraded: if an entry no longer applies, cargo-deny warns
+# about the unused ignore and it should be deleted.
+ignore = [
+    "RUSTSEC-2025-0075",  # unic-char-range
+    "RUSTSEC-2025-0080",  # unic-common
+    "RUSTSEC-2025-0081",  # unic-char-property
+    "RUSTSEC-2025-0098",  # unic-ucd-version
+    "RUSTSEC-2025-0100",  # unic-ucd-ident
+]
+
+[licenses]
+version = 2
+# Permissive licences only. SwiftLoad ships as a binary to end users, so a copyleft dependency
+# would carry obligations the project has not taken on.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    # File-level copyleft, and only on dependencies we do not modify (cssparser, dtoa-short,
+    # option-ext). Shipping them unmodified inside a binary carries no source obligation.
+    "MPL-2.0",
+    "BSL-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"    # a workspace this size always has some; not worth churning
+# A wildcard version on a crates.io dependency means an unreviewed upgrade can arrive silently.
+# Path dependencies between our own crates are a different thing wearing the same clothes, and
+# are exempted rather than the whole check being turned off.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

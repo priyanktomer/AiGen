@@ -3,5 +3,8 @@
 /**
  * Queue ordering. `Ord` runs Low < Normal < High, so higher priority sorts later and the
  * queue is read in descending order.
+ *
+ * Lives here rather than in the scheduler because it is persisted: a queue the user reordered
+ * should still be in that order after a restart.
  */
 export type Priority = "low" | "normal" | "high";

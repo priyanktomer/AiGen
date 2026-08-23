@@ -10,3 +10,9 @@ app/src-tauri/gen
 # UI build products and dependencies.
 node_modules/
 app/ui/dist/
+
+# cargo-fuzz working data. The targets are source; the corpus and crash artifacts are not.
+crates/swiftload-core/fuzz/target/
+crates/swiftload-core/fuzz/corpus/
+crates/swiftload-core/fuzz/artifacts/
+crates/swiftload-core/fuzz/Cargo.lock

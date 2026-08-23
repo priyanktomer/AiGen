@@ -1,0 +1,30 @@
+[package]
+name = "swiftload-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Its own workspace: the fuzz targets need nightly and a libFuzzer sanitiser runtime, neither
+# of which should be imposed on `cargo test --workspace`.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+swiftload-core = { path = ".." }
+
+[[bin]]
+name = "filename"
+path = "fuzz_targets/filename.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content_disposition"
+path = "fuzz_targets/content_disposition.rs"
+test = false
+doc = false
+bench = false
